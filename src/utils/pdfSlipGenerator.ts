@@ -705,11 +705,14 @@ export function downloadCandidateQuestionsPdf(
   // Build question list to render
   const records = res.attemptedRecord || [];
   const filtered = records.filter((item) => {
+    const isTya = item.questionType === 'TYA';
     if (mode === 'Download failed questions only') {
-      return item.selectedAnswer !== item.correctAnswer;
+      return isTya ? !item.isCorrect : item.selectedAnswer !== item.correctAnswer;
     }
     if (mode === 'Download total questions attempted') {
-      return item.selectedAnswer !== null;
+      return isTya
+        ? Boolean(item.typedAnswer && item.typedAnswer.trim().length > 0)
+        : item.selectedAnswer !== null;
     }
     return true;
   });
@@ -719,11 +722,27 @@ export function downloadCandidateQuestionsPdf(
     questionText: string;
     options: string[];
     correctAnswer: number;
+    questionType?: 'MCQ' | 'TYA';
+    typedAnswer?: string;
+    answerKeys?: string[];
+    isCorrect?: boolean;
+    aiEvaluated?: boolean;
+    aiExplanation?: string;
+    marksAwarded?: number;
+    maxMarks?: number;
   }[] = (filtered.length > 0 ? filtered : records).map((r) => ({
     subject: r.subject,
     questionText: r.questionText,
     options: r.options,
     correctAnswer: r.correctAnswer,
+    questionType: r.questionType,
+    typedAnswer: r.typedAnswer,
+    answerKeys: r.answerKeys,
+    isCorrect: r.isCorrect,
+    aiEvaluated: r.aiEvaluated,
+    aiExplanation: r.aiExplanation,
+    marksAwarded: r.marksAwarded,
+    maxMarks: r.maxMarks,
   }));
 
   // Fallback to question bank for pre-seeded results that don't have attemptedRecord populated
@@ -740,17 +759,16 @@ export function downloadCandidateQuestionsPdf(
       questionText: q.questionText,
       options: q.options,
       correctAnswer: q.correctAnswer,
+      questionType: q.questionType,
+      answerKeys: q.answerKeys,
+      maxMarks: q.mark || 1,
     }));
   }
 
   // Group questions by subject while preserving subject order
   const subjectGroups: {
     subject: string;
-    items: {
-      questionText: string;
-      options: string[];
-      correctAnswer: number;
-    }[];
+    items: typeof listToRender;
   }[] = [];
 
   listToRender.forEach((item) => {
@@ -759,11 +777,7 @@ export function downloadCandidateQuestionsPdf(
       group = { subject: item.subject, items: [] };
       subjectGroups.push(group);
     }
-    group.items.push({
-      questionText: item.questionText,
-      options: item.options,
-      correctAnswer: item.correctAnswer,
-    });
+    group.items.push(item);
   });
 
   // Page 1 Top Header: Official Logo + "QUEMINT SIMULATED EXAMS [ MEDICAL ASPIRANT ] 1.0"
@@ -784,7 +798,7 @@ export function downloadCandidateQuestionsPdf(
   doc.setFontSize(10);
   doc.setTextColor(15, 23, 42);
   doc.text(
-    'Name: ........................................................................................................................',
+    `Name: ${res.candidateName} (${res.regNumber})`,
     marginX,
     68
   );
@@ -820,6 +834,7 @@ export function downloadCandidateQuestionsPdf(
     currentY += 20;
 
     group.items.forEach((qItem) => {
+      const isTya = qItem.questionType === 'TYA';
       doc.setFont('helvetica', 'normal');
       doc.setFontSize(9.2);
       const wrappedQ: string[] = doc.splitTextToSize(
@@ -827,8 +842,9 @@ export function downloadCandidateQuestionsPdf(
         contentWidth - 28
       );
 
-      const estimatedHeight =
-        wrappedQ.length * 13 + 15 + qItem.options.length * 14 + 10;
+      const estimatedHeight = isTya
+        ? wrappedQ.length * 13 + 78
+        : wrappedQ.length * 13 + 15 + qItem.options.length * 14 + 10;
 
       if (currentY + estimatedHeight > pageHeight - 46) {
         doc.addPage();
@@ -836,49 +852,117 @@ export function downloadCandidateQuestionsPdf(
       }
 
       // Question Number + Question Text
-      doc.setFont('helvetica', 'normal');
+      doc.setFont('helvetica', 'bold');
       doc.setFontSize(9.2);
       doc.setTextColor(30, 41, 59);
-      doc.text(`${globalQuestionNumber}.`, marginX + 10, currentY);
+      doc.text(`Q${globalQuestionNumber}:`, marginX + 6, currentY);
 
+      doc.setFont('helvetica', 'normal');
       wrappedQ.forEach((lineStr: string) => {
-        doc.text(lineStr, marginX + 24, currentY);
+        doc.text(lineStr, marginX + 26, currentY);
         currentY += 13;
       });
 
-      // "Options:" label
-      currentY += 1;
-      doc.setFont('helvetica', 'bold');
-      doc.setFontSize(7.8);
-      doc.setTextColor(15, 23, 42);
-      doc.text('Options:', marginX + 24, currentY);
-      currentY += 14;
+      if (isTya) {
+        const officialKey =
+          qItem.answerKeys && qItem.answerKeys.length > 0
+            ? qItem.answerKeys.join(' / ')
+            : qItem.options[0] || 'N/A';
+        const candTyped = (qItem.typedAnswer || '').trim() || 'No Answer Typed';
+        const isCorr = Boolean(qItem.isCorrect);
+        const maxM = qItem.maxMarks || 1;
+        const awardedM =
+          typeof qItem.marksAwarded === 'number'
+            ? qItem.marksAwarded
+            : isCorr
+            ? maxM
+            : 0;
 
-      // Options A, B, C, D (Correct option in bold + green ✓, no student answer indicator)
-      qItem.options.forEach((optText, optIdx) => {
-        const isCorrect = optIdx === qItem.correctAnswer;
-        const prefix = letters[optIdx] || String.fromCharCode(65 + optIdx);
-        const fullOptionStr = `${prefix}. ${optText}`;
+        currentY += 2;
+        doc.setFont('helvetica', 'bold');
+        doc.setFontSize(8.5);
+        doc.setTextColor(30, 41, 59);
+        doc.text(`Candidate Answer: ${candTyped}`, marginX + 26, currentY);
+        currentY += 12;
 
-        if (isCorrect) {
-          doc.setFont('helvetica', 'bold');
-          doc.setFontSize(9.2);
-          doc.setTextColor(15, 23, 42);
-          doc.text(fullOptionStr, marginX + 34, currentY);
+        doc.setFont('helvetica', 'bold');
+        doc.setTextColor(10, 107, 60);
+        doc.text(`Answer Key: ${officialKey}`, marginX + 26, currentY);
+        currentY += 12;
 
-          const textW = doc.getTextWidth(fullOptionStr);
-          drawGreenCheckmark(marginX + 34 + textW + 5, currentY);
+        doc.setFont('helvetica', 'bold');
+        if (isCorr) {
+          doc.setTextColor(10, 107, 60);
+          doc.text(
+            `AI Evaluation: CORRECT ${qItem.aiEvaluated ? '(AI Verified Scientific Equivalence)' : '(Exact Match)'}   |   Marks: ${awardedM}/${maxM}`,
+            marginX + 26,
+            currentY
+          );
         } else {
-          doc.setFont('helvetica', 'normal');
-          doc.setFontSize(9.2);
-          doc.setTextColor(30, 41, 59);
-          doc.text(fullOptionStr, marginX + 34, currentY);
+          doc.setTextColor(200, 30, 30);
+          doc.text(
+            `AI Evaluation: WRONG   |   Marks: ${awardedM}/${maxM}`,
+            marginX + 26,
+            currentY
+          );
         }
+        currentY += 13;
 
+        const explanationStr =
+          qItem.aiExplanation ||
+          (isCorr
+            ? `Your answer "${candTyped}" is scientifically accurate and equivalent to ${officialKey}.`
+            : `Expected "${officialKey}".`);
+
+        doc.setFont('helvetica', 'italic');
+        doc.setFontSize(8.3);
+        doc.setTextColor(105, 112, 120);
+        const wrappedExpl: string[] = doc.splitTextToSize(
+          `Explanation: "${explanationStr}"`,
+          contentWidth - 34
+        );
+        wrappedExpl.forEach((eLine: string) => {
+          doc.text(eLine, marginX + 26, currentY);
+          currentY += 11.5;
+        });
+
+        currentY += 8;
+      } else {
+        // "Options:" label
+        currentY += 1;
+        doc.setFont('helvetica', 'bold');
+        doc.setFontSize(7.8);
+        doc.setTextColor(15, 23, 42);
+        doc.text('Options:', marginX + 26, currentY);
         currentY += 14;
-      });
 
-      currentY += 8;
+        // Options A, B, C, D (Correct option in bold + green ✓)
+        qItem.options.forEach((optText, optIdx) => {
+          const isCorrect = optIdx === qItem.correctAnswer;
+          const prefix = letters[optIdx] || String.fromCharCode(65 + optIdx);
+          const fullOptionStr = `${prefix}. ${optText}`;
+
+          if (isCorrect) {
+            doc.setFont('helvetica', 'bold');
+            doc.setFontSize(9.2);
+            doc.setTextColor(15, 23, 42);
+            doc.text(fullOptionStr, marginX + 34, currentY);
+
+            const textW = doc.getTextWidth(fullOptionStr);
+            drawGreenCheckmark(marginX + 34 + textW + 5, currentY);
+          } else {
+            doc.setFont('helvetica', 'normal');
+            doc.setFontSize(9.2);
+            doc.setTextColor(30, 41, 59);
+            doc.text(fullOptionStr, marginX + 34, currentY);
+          }
+
+          currentY += 14;
+        });
+
+        currentY += 8;
+      }
+
       globalQuestionNumber++;
     });
   });

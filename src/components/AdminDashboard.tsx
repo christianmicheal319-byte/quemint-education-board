@@ -44,6 +44,8 @@ import {
   Database,
   X,
   EyeOff,
+  FileSpreadsheet,
+  Calendar,
 } from 'lucide-react';
 import { jsPDF } from 'jspdf';
 import autoTable from 'jspdf-autotable';
@@ -59,6 +61,7 @@ import {
   PublishedTest,
   Question,
   QuestionDownloadMode,
+  QuestionType,
   ResultSlipFieldConfig,
   SubjectCombinationConfig,
   SubjectPoolConfig,
@@ -81,6 +84,8 @@ import { hashPasswordSha256, simpleFallbackHash } from '../utils/passwordHash';
 import { QuemintSeal, QUEMINT_LOGO_URL } from './QuemintSeal';
 import { RegistrationSlipModal } from './RegistrationSlipModal';
 import { LiveProctoringPanel } from './LiveProctoringPanel';
+import { PerformanceAnalysisPanel } from './PerformanceAnalysisPanel';
+import { ExamSchedulePanel } from './ExamSchedulePanel';
 import {
   getQuemintGradeInfo,
   getEffectiveResultSlipFields,
@@ -94,6 +99,14 @@ import {
   formatBulkCandidatesAsText,
   downloadRegisteredCandidatesPdf,
 } from '../utils/pdfSlipGenerator';
+import {
+  SAMPLE_20_BIOLOGY_TYA_6COL_TEXT,
+  parseAnswerKeys,
+  parseBulkQuestionsInput,
+  resolveAttemptedItemsForResult,
+  downloadAttemptWithAiExplanationsPdf,
+  downloadAttemptWithAiExplanationsExcelCsv,
+} from '../utils/tyaEvaluator';
 
 interface AdminDashboardProps {
   candidates: Candidate[];
@@ -126,8 +139,10 @@ type AdminTab =
   | 'Overview'
   | 'Candidates'
   | 'Exam Centers'
+  | 'Exam Schedule'
   | 'Question bank'
   | 'Results'
+  | 'Performance Analysis'
   | 'Analytics'
   | 'Live Proctoring'
   | 'Settings / Create Exam'
@@ -633,6 +648,13 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
   const [qOptC, setQOptC] = useState('');
   const [qOptD, setQOptD] = useState('');
   const [qCorrect, setQCorrect] = useState(0);
+  const [qType, setQType] = useState<QuestionType>('MCQ');
+  const [qMarkInput, setQMarkInput] = useState<number>(1);
+  const [qAnswerKeysInput, setQAnswerKeysInput] = useState<string>('');
+  const [qAllowAiEval, setQAllowAiEval] = useState<boolean>(true);
+  const [bulkQuestionPasteText, setBulkQuestionPasteText] = useState<string>('');
+  const [previewedBulkQuestions, setPreviewedBulkQuestions] = useState<Question[]>([]);
+  const [expandedAiExplanations, setExpandedAiExplanations] = useState<Record<string, boolean>>({});
 
   const [copiedId, setCopiedId] = useState<string | null>(null);
 
@@ -708,8 +730,9 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
       ) {
         existingPooling.push({
           subject: subj,
-          enabled: true,
-          poolSize: 15,
+          subjectTotal: 15,
+          expanded: false,
+          banks: [],
         });
       }
     });
@@ -1771,8 +1794,22 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
               label: `Examination Centre (${examCenters.length})`,
               icon: MapPin,
             },
+            {
+              id: 'Exam Schedule',
+              label: `Exam Schedule${
+                (settings.examSchedules || []).length > 0
+                  ? ` (${(settings.examSchedules || []).length})`
+                  : ''
+              }`,
+              icon: Calendar,
+            },
             { id: 'Question bank', label: 'Question bank', icon: BookOpen },
             { id: 'Results', label: 'Results', icon: FileText },
+            {
+              id: 'Performance Analysis',
+              label: 'Performance Analysis',
+              icon: BarChart3,
+            },
             { id: 'Analytics', label: 'Analytics', icon: BarChart3 },
             { id: 'Live Proctoring', label: 'Live Proctoring', icon: Video },
             { id: 'Settings / Create Exam', label: 'Settings / Create Exam', icon: Settings },
@@ -3393,7 +3430,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                   type="button"
                   onClick={() =>
                     handleCopy(
-                      `CREATE TABLE IF NOT EXISTS public.exam_centers (\n  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),\n  name TEXT NOT NULL UNIQUE,\n  max_capacity INTEGER NOT NULL DEFAULT 50 CHECK (max_capacity > 0),\n  current_count INTEGER NOT NULL DEFAULT 0 CHECK (current_count >= 0),\n  created_at TIMESTAMPTZ NOT NULL DEFAULT now()\n);\n\nALTER TABLE public.students\n  ADD COLUMN IF NOT EXISTS first_name TEXT,\n  ADD COLUMN IF NOT EXISTS middle_name TEXT,\n  ADD COLUMN IF NOT EXISTS surname TEXT,\n  ADD COLUMN IF NOT EXISTS subject_combination TEXT,\n  ADD COLUMN IF NOT EXISTS course_of_study TEXT,\n  ADD COLUMN IF NOT EXISTS category TEXT CHECK (category IN ('Art', 'Science', 'Commercial')),\n  ADD COLUMN IF NOT EXISTS state_of_origin TEXT,\n  ADD COLUMN IF NOT EXISTS password_hash TEXT,\n  ADD COLUMN IF NOT EXISTS exam_center_id UUID REFERENCES public.exam_centers(id) ON DELETE SET NULL;\n\nCREATE TABLE IF NOT EXISTS public.system_settings (\n  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),\n  key TEXT NOT NULL UNIQUE,\n  value TEXT NOT NULL,\n  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),\n  updated_at TIMESTAMPTZ NOT NULL DEFAULT now()\n);\n\nINSERT INTO public.system_settings (key, value)\nVALUES\n  ('exam_start_flow', 'dashboard_first'),\n  ('default_candidate_password', '9b871512327c09ce91dd649b3f96a63b7408ef267c8cc5710114e629730cb61f')\nON CONFLICT (key) DO UPDATE\nSET value = EXCLUDED.value,\n    updated_at = now();`,
+                      `CREATE TABLE IF NOT EXISTS public.exam_centers (\n  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),\n  name TEXT NOT NULL UNIQUE,\n  max_capacity INTEGER NOT NULL DEFAULT 50 CHECK (max_capacity > 0),\n  current_count INTEGER NOT NULL DEFAULT 0 CHECK (current_count >= 0),\n  created_at TIMESTAMPTZ NOT NULL DEFAULT now()\n);\n\nALTER TABLE public.students\n  ADD COLUMN IF NOT EXISTS first_name TEXT,\n  ADD COLUMN IF NOT EXISTS middle_name TEXT,\n  ADD COLUMN IF NOT EXISTS surname TEXT,\n  ADD COLUMN IF NOT EXISTS subject_combination TEXT,\n  ADD COLUMN IF NOT EXISTS course_of_study TEXT,\n  ADD COLUMN IF NOT EXISTS category TEXT CHECK (category IN ('Art', 'Science', 'Commercial')),\n  ADD COLUMN IF NOT EXISTS state_of_origin TEXT,\n  ADD COLUMN IF NOT EXISTS password_hash TEXT,\n  ADD COLUMN IF NOT EXISTS exam_center_id UUID REFERENCES public.exam_centers(id) ON DELETE SET NULL;\n\n-- TYA (Type Your Answers) + AI Evaluation Columns\nALTER TABLE public.questions\n  ADD COLUMN IF NOT EXISTS question_type VARCHAR(10) NOT NULL DEFAULT 'MCQ',\n  ADD COLUMN IF NOT EXISTS answer_keys JSONB DEFAULT '[]'::jsonb,\n  ADD COLUMN IF NOT EXISTS allow_ai_eval BOOLEAN NOT NULL DEFAULT true,\n  ADD COLUMN IF NOT EXISTS explanation TEXT,\n  ADD COLUMN IF NOT EXISTS mark INTEGER NOT NULL DEFAULT 1;\n\nALTER TABLE public.student_answers\n  ADD COLUMN IF NOT EXISTS typed_answer TEXT,\n  ADD COLUMN IF NOT EXISTS is_correct BOOLEAN,\n  ADD COLUMN IF NOT EXISTS ai_evaluated BOOLEAN NOT NULL DEFAULT false,\n  ADD COLUMN IF NOT EXISTS ai_explanation TEXT,\n  ADD COLUMN IF NOT EXISTS marks_awarded INTEGER NOT NULL DEFAULT 0;\n\nCREATE TABLE IF NOT EXISTS public.system_settings (\n  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),\n  key TEXT NOT NULL UNIQUE,\n  value TEXT NOT NULL,\n  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),\n  updated_at TIMESTAMPTZ NOT NULL DEFAULT now()\n);\n\nINSERT INTO public.system_settings (key, value)\nVALUES\n  ('exam_start_flow', 'dashboard_first'),\n  ('enable_ai_evaluation_for_tya', 'true'),\n  ('default_candidate_password', '9b871512327c09ce91dd649b3f96a63b7408ef267c8cc5710114e629730cb61f')\nON CONFLICT (key) DO UPDATE\nSET value = EXCLUDED.value,\n    updated_at = now();`,
                       'supabase-migration-sql'
                     )
                   }
@@ -3413,7 +3450,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                 </button>
               </div>
               <pre className="p-4 rounded-xl bg-neutral-900 text-emerald-400 font-mono text-[11px] overflow-x-auto leading-relaxed">
-{`-- Non-destructive migration: Keeps all existing student columns (email, phone, password, etc.)
+{`-- Non-destructive migration: Keeps all existing student & question columns
 CREATE TABLE IF NOT EXISTS public.exam_centers (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   name TEXT NOT NULL UNIQUE,
@@ -3433,6 +3470,21 @@ ALTER TABLE public.students
   ADD COLUMN IF NOT EXISTS password_hash TEXT,
   ADD COLUMN IF NOT EXISTS exam_center_id UUID REFERENCES public.exam_centers(id) ON DELETE SET NULL;
 
+-- TYA (Type Your Answers) + AI Evaluation Columns
+ALTER TABLE public.questions
+  ADD COLUMN IF NOT EXISTS question_type VARCHAR(10) NOT NULL DEFAULT 'MCQ',
+  ADD COLUMN IF NOT EXISTS answer_keys JSONB DEFAULT '[]'::jsonb,
+  ADD COLUMN IF NOT EXISTS allow_ai_eval BOOLEAN NOT NULL DEFAULT true,
+  ADD COLUMN IF NOT EXISTS explanation TEXT,
+  ADD COLUMN IF NOT EXISTS mark INTEGER NOT NULL DEFAULT 1;
+
+ALTER TABLE public.student_answers
+  ADD COLUMN IF NOT EXISTS typed_answer TEXT,
+  ADD COLUMN IF NOT EXISTS is_correct BOOLEAN,
+  ADD COLUMN IF NOT EXISTS ai_evaluated BOOLEAN NOT NULL DEFAULT false,
+  ADD COLUMN IF NOT EXISTS ai_explanation TEXT,
+  ADD COLUMN IF NOT EXISTS marks_awarded INTEGER NOT NULL DEFAULT 0;
+
 CREATE TABLE IF NOT EXISTS public.system_settings (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   key TEXT NOT NULL UNIQUE,
@@ -3444,6 +3496,7 @@ CREATE TABLE IF NOT EXISTS public.system_settings (
 INSERT INTO public.system_settings (key, value)
 VALUES
   ('exam_start_flow', 'dashboard_first'),
+  ('enable_ai_evaluation_for_tya', 'true'),
   ('default_candidate_password', '9b871512327c09ce91dd649b3f96a63b7408ef267c8cc5710114e629730cb61f')
 ON CONFLICT (key) DO UPDATE
 SET value = EXCLUDED.value,
@@ -3869,160 +3922,458 @@ SET value = EXCLUDED.value,
                 </button>
 
                 <div className="grid grid-cols-1 lg:grid-cols-12 gap-8 items-start">
-                  <div className="lg:col-span-5 p-6 rounded-2xl border border-neutral-200 bg-white text-black space-y-4">
-                    <h2 className="text-base font-extrabold text-black">
-                      Add Question to {qSubject}
-                    </h2>
-                    <div className="grid grid-cols-2 gap-3">
-                      <div>
-                        <label className="block text-xs font-bold text-neutral-700 mb-1">
-                          Subject
-                        </label>
-                        <input
-                          type="text"
-                          readOnly
-                          value={qSubject}
-                          className="w-full px-3 py-2 rounded-lg border border-neutral-300 text-xs font-bold text-black bg-neutral-50"
-                        />
+                  <div className="lg:col-span-5 space-y-6">
+                    {/* Single Question Form (MCQ or TYA) */}
+                    <div className="p-6 rounded-2xl border border-neutral-200 bg-white text-black space-y-4">
+                      <div className="flex items-center justify-between gap-2">
+                        <h2 className="text-base font-extrabold text-black">
+                          Add Question to {qSubject}
+                        </h2>
+                        <span className="px-2.5 py-1 rounded-full bg-[#0a6b3c]/10 text-[#0a6b3c] text-[11px] font-extrabold">
+                          {qType === 'TYA' ? 'TYA + AI Eval' : 'MCQ (Options A-D)'}
+                        </span>
                       </div>
-                      <div>
-                        <label className="block text-xs font-bold text-neutral-700 mb-1">
-                          Category
-                        </label>
-                        <select
-                          value={qCategory}
-                          onChange={(e) =>
-                            setQCategory(e.target.value as CategoryType | 'All')
-                          }
-                          className="w-full px-3 py-2 rounded-lg border border-neutral-300 text-xs font-bold text-black bg-white"
-                        >
-                          <option value="All">All Categories</option>
-                          {subjectCombinations.map((combo) => (
-                            <option key={combo.id} value={combo.name}>
-                              {combo.name}
-                            </option>
-                          ))}
-                        </select>
-                      </div>
-                    </div>
 
-                    <div>
-                      <label className="block text-xs font-bold text-neutral-700 mb-1">
-                        Question Prompt
-                      </label>
-                      <textarea
-                        rows={3}
-                        value={qText}
-                        onChange={(e) => setQText(e.target.value)}
-                        placeholder="Enter the question stem..."
-                        className="w-full p-3 rounded-lg border border-neutral-300 text-xs text-black"
-                      />
-                    </div>
-
-                    <div className="space-y-2">
-                      {[
-                        { label: 'Option A', val: qOptA, set: setQOptA },
-                        { label: 'Option B', val: qOptB, set: setQOptB },
-                        { label: 'Option C', val: qOptC, set: setQOptC },
-                        { label: 'Option D', val: qOptD, set: setQOptD },
-                      ].map((opt, idx) => (
-                        <div key={idx} className="flex items-center gap-2">
-                          <input
-                            type="radio"
-                            name="correctOpt"
-                            checked={qCorrect === idx}
-                            onChange={() => setQCorrect(idx)}
-                            className="accent-[#0a6b3c]"
-                          />
+                      <div className="grid grid-cols-2 gap-3">
+                        <div>
+                          <label className="block text-xs font-bold text-neutral-700 mb-1">
+                            Subject
+                          </label>
                           <input
                             type="text"
-                            value={opt.val}
-                            onChange={(e) => opt.set(e.target.value)}
-                            placeholder={`${opt.label} (Select radio if correct)`}
-                            className="flex-1 px-3 py-2 rounded-lg border border-neutral-300 text-xs text-black"
+                            readOnly
+                            value={qSubject}
+                            className="w-full px-3 py-2 rounded-lg border border-neutral-300 text-xs font-bold text-black bg-neutral-50"
                           />
                         </div>
-                      ))}
+                        <div>
+                          <label className="block text-xs font-bold text-neutral-700 mb-1">
+                            Category
+                          </label>
+                          <select
+                            value={qCategory}
+                            onChange={(e) =>
+                              setQCategory(e.target.value as CategoryType | 'All')
+                            }
+                            className="w-full px-3 py-2 rounded-lg border border-neutral-300 text-xs font-bold text-black bg-white"
+                          >
+                            <option value="All">All Categories</option>
+                            {subjectCombinations.map((combo) => (
+                              <option key={combo.id} value={combo.name}>
+                                {combo.name}
+                              </option>
+                            ))}
+                          </select>
+                        </div>
+                      </div>
+
+                      {/* Question Type Selector: MCQ vs TYA */}
+                      <div className="grid grid-cols-2 gap-3">
+                        <div>
+                          <label className="block text-xs font-bold text-neutral-700 mb-1">
+                            Question Type (MCQ or TYA)
+                          </label>
+                          <select
+                            value={qType}
+                            onChange={(e) => setQType(e.target.value as QuestionType)}
+                            className="w-full px-3 py-2 rounded-lg border-2 border-[#0a6b3c] text-xs font-extrabold text-black bg-white"
+                          >
+                            <option value="MCQ">MCQ (Multiple Choice A–D)</option>
+                            <option value="TYA">TYA (Type Your Answer)</option>
+                          </select>
+                        </div>
+                        <div>
+                          <label className="block text-xs font-bold text-neutral-700 mb-1">
+                            Mark
+                          </label>
+                          <input
+                            type="number"
+                            min={1}
+                            max={20}
+                            value={qMarkInput}
+                            onChange={(e) =>
+                              setQMarkInput(Math.max(1, Number(e.target.value) || 1))
+                            }
+                            className="w-full px-3 py-2 rounded-lg border border-neutral-300 text-xs font-bold text-black bg-white"
+                          />
+                        </div>
+                      </div>
+
+                      <div>
+                        <label className="block text-xs font-bold text-neutral-700 mb-1">
+                          Question Prompt
+                        </label>
+                        <textarea
+                          rows={3}
+                          value={qText}
+                          onChange={(e) => setQText(e.target.value)}
+                          placeholder={
+                            qType === 'TYA'
+                              ? 'e.g., Which part of the nephron is mainly responsible for ultrafiltration of blood?'
+                              : 'Enter the question stem...'
+                          }
+                          className="w-full p-3 rounded-lg border border-neutral-300 text-xs text-black"
+                        />
+                      </div>
+
+                      {qType === 'TYA' ? (
+                        <div className="space-y-3 p-3.5 rounded-xl bg-[#0a6b3c]/5 border border-[#0a6b3c]/25">
+                          <div>
+                            <label className="block text-xs font-extrabold text-[#0a6b3c] mb-1">
+                              Answer Key(s)
+                            </label>
+                            <input
+                              type="text"
+                              value={qAnswerKeysInput}
+                              onChange={(e) => setQAnswerKeysInput(e.target.value)}
+                              placeholder="e.g., Grana | Thylakoid membrane | Thylakoid membranes"
+                              className="w-full px-3 py-2.5 rounded-lg border border-[#0a6b3c]/40 bg-white text-xs font-bold text-black"
+                            />
+                            <p className="text-[11px] text-neutral-600 mt-1">
+                              Separate multiple correct answers with{' '}
+                              <code className="font-mono font-bold text-[#0a6b3c]">|</code>{' '}
+                              (e.g., <span className="font-semibold">Grana | Thylakoid membrane</span>)
+                            </p>
+                          </div>
+
+                          <label className="flex items-center gap-2.5 cursor-pointer select-none pt-1">
+                            <input
+                              type="checkbox"
+                              checked={qAllowAiEval}
+                              onChange={(e) => setQAllowAiEval(e.target.checked)}
+                              className="w-4 h-4 accent-[#0a6b3c] rounded"
+                            />
+                            <span className="text-xs font-extrabold text-black">
+                              Enable AI Evaluation (Scientific equivalence &amp; synonyms)
+                            </span>
+                          </label>
+                        </div>
+                      ) : (
+                        <div className="space-y-2">
+                          {[
+                            { label: 'Option A', val: qOptA, set: setQOptA },
+                            { label: 'Option B', val: qOptB, set: setQOptB },
+                            { label: 'Option C', val: qOptC, set: setQOptC },
+                            { label: 'Option D', val: qOptD, set: setQOptD },
+                          ].map((opt, idx) => (
+                            <div key={idx} className="flex items-center gap-2">
+                              <input
+                                type="radio"
+                                name="correctOpt"
+                                checked={qCorrect === idx}
+                                onChange={() => setQCorrect(idx)}
+                                className="accent-[#0a6b3c]"
+                              />
+                              <input
+                                type="text"
+                                value={opt.val}
+                                onChange={(e) => opt.set(e.target.value)}
+                                placeholder={`${opt.label} (Select radio if correct)`}
+                                className="flex-1 px-3 py-2 rounded-lg border border-neutral-300 text-xs text-black"
+                              />
+                            </div>
+                          ))}
+                        </div>
+                      )}
+
+                      <button
+                        type="button"
+                        onClick={() => {
+                          if (!qText.trim()) return;
+                          if (qType === 'TYA') {
+                            const keys = parseAnswerKeys(qAnswerKeysInput);
+                            if (keys.length === 0) {
+                              triggerToast('Please enter at least one Answer Key for TYA.');
+                              return;
+                            }
+                            onAddQuestion({
+                              id: `q-tya-${Date.now()}`,
+                              subject: qSubject,
+                              category: qCategory,
+                              questionType: 'TYA',
+                              questionText: qText.trim(),
+                              options: [],
+                              correctAnswer: 0,
+                              answerKeys: keys,
+                              mark: qMarkInput || 1,
+                              allowAiEval: qAllowAiEval,
+                            });
+                            setQText('');
+                            setQAnswerKeysInput('');
+                            triggerToast(`Saved TYA question to ${qSubject} bank.`);
+                          } else {
+                            if (!qOptA.trim() || !qOptB.trim()) return;
+                            onAddQuestion({
+                              id: `q-${Date.now()}`,
+                              subject: qSubject,
+                              category: qCategory,
+                              questionType: 'MCQ',
+                              questionText: qText.trim(),
+                              options: [
+                                qOptA.trim(),
+                                qOptB.trim(),
+                                qOptC.trim() || 'None of the above',
+                                qOptD.trim() || 'All of the above',
+                              ],
+                              correctAnswer: qCorrect,
+                              mark: qMarkInput || 1,
+                            });
+                            setQText('');
+                            setQOptA('');
+                            setQOptB('');
+                            setQOptC('');
+                            setQOptD('');
+                            triggerToast(`Saved MCQ question to ${qSubject} bank.`);
+                          }
+                        }}
+                        className="w-full py-2.5 px-4 rounded-xl bg-[#0a6b3c] hover:bg-[#0e8a4e] text-white text-xs font-extrabold uppercase tracking-wider cursor-pointer"
+                      >
+                        + Save {qType} Question to Bank
+                      </button>
                     </div>
 
-                    <button
-                      type="button"
-                      onClick={() => {
-                        if (!qText.trim() || !qOptA.trim() || !qOptB.trim()) return;
-                        onAddQuestion({
-                          id: `q-${Date.now()}`,
-                          subject: qSubject,
-                          category: qCategory,
-                          questionText: qText.trim(),
-                          options: [
-                            qOptA.trim(),
-                            qOptB.trim(),
-                            qOptC.trim() || 'None of the above',
-                            qOptD.trim() || 'All of the above',
-                          ],
-                          correctAnswer: qCorrect,
-                        });
-                        setQText('');
-                        setQOptA('');
-                        setQOptB('');
-                        setQOptC('');
-                        setQOptD('');
-                      }}
-                      className="w-full py-2.5 px-4 rounded-xl bg-[#0a6b3c] hover:bg-[#0e8a4e] text-white text-xs font-extrabold uppercase tracking-wider cursor-pointer"
-                    >
-                      + Save Question to Bank
-                    </button>
+                    {/* Bulk Upload / Paste 6-Column Format (Supports MCQ & TYA) */}
+                    <div className="p-6 rounded-2xl border-2 border-[#0a6b3c] bg-white text-black space-y-4">
+                      <div className="flex flex-wrap items-center justify-between gap-2">
+                        <div>
+                          <h3 className="text-sm font-extrabold text-black">
+                            Bulk Upload / Paste Questions (6-Column MCQ &amp; TYA)
+                          </h3>
+                          <p className="text-[11px] text-neutral-600 mt-0.5">
+                            Column 2 detects <code className="font-mono font-bold text-[#0a6b3c]">MCQ</code> or{' '}
+                            <code className="font-mono font-bold text-[#0a6b3c]">TYA</code> automatically
+                          </p>
+                        </div>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setBulkQuestionPasteText(SAMPLE_20_BIOLOGY_TYA_6COL_TEXT);
+                            const parsed = parseBulkQuestionsInput(
+                              SAMPLE_20_BIOLOGY_TYA_6COL_TEXT,
+                              qSubject,
+                              qCategory
+                            );
+                            setPreviewedBulkQuestions(parsed);
+                            triggerToast('Loaded 20 Biology TYA sample questions into preview.');
+                          }}
+                          className="px-3 py-1.5 rounded-lg bg-[#0a6b3c]/10 hover:bg-[#0a6b3c]/20 text-[#0a6b3c] text-[11px] font-extrabold cursor-pointer"
+                        >
+                          Load 20 Biology TYA Questions
+                        </button>
+                      </div>
+
+                      <div className="p-3 rounded-xl bg-neutral-50 border border-neutral-200 text-[11px] space-y-1 font-mono text-neutral-700">
+                        <div className="font-sans font-extrabold text-black">
+                          Format A — MCQ (6 Columns):
+                        </div>
+                        <div>
+                          QNo | MCQ | Question | (A) Opt1 (B) Opt2 (C) Opt3 (D) Opt4 | C | 1
+                        </div>
+                        <div className="font-sans font-extrabold text-[#0a6b3c] pt-1">
+                          Format B — TYA (6 Columns):
+                        </div>
+                        <div>
+                          1 | TYA | Which part of the nephron is mainly responsible for ultrafiltration of blood? | Glomerulus | 1 | YES
+                        </div>
+                        <div>
+                          21 | TYA | Light dependent stage of photosynthesis occurs where? | Grana ; Thylakoid membrane | 1 | YES
+                        </div>
+                      </div>
+
+                      <textarea
+                        rows={6}
+                        value={bulkQuestionPasteText}
+                        onChange={(e) => {
+                          const val = e.target.value;
+                          setBulkQuestionPasteText(val);
+                          setPreviewedBulkQuestions(
+                            parseBulkQuestionsInput(val, qSubject, qCategory)
+                          );
+                        }}
+                        placeholder={`1 | TYA | Which part of the nephron is mainly responsible for ultrafiltration of blood? | Glomerulus | 1 | YES\n2 | TYA | In which stage of mitosis do chromosomes align at the equator of the cell? | Metaphase | 1 | YES`}
+                        className="w-full p-3 rounded-xl border border-neutral-300 font-mono text-xs text-black"
+                      />
+
+                      {previewedBulkQuestions.length > 0 && (
+                        <div className="p-3 rounded-xl bg-[#0a6b3c]/5 border border-[#0a6b3c]/25 space-y-2">
+                          <div className="flex items-center justify-between text-xs font-extrabold text-[#0a6b3c]">
+                            <span>
+                              Parsed {previewedBulkQuestions.length} Question(s) (
+                              {
+                                previewedBulkQuestions.filter(
+                                  (q) => q.questionType === 'TYA'
+                                ).length
+                              }{' '}
+                              TYA,{' '}
+                              {
+                                previewedBulkQuestions.filter(
+                                  (q) => q.questionType !== 'TYA'
+                                ).length
+                              }{' '}
+                              MCQ)
+                            </span>
+                          </div>
+                          <div className="max-h-40 overflow-y-auto space-y-1.5 pr-1">
+                            {previewedBulkQuestions.map((pq, idx) => (
+                              <div
+                                key={pq.id}
+                                className="p-2 rounded-lg bg-white border border-neutral-200 text-[11px] flex items-start justify-between gap-2"
+                              >
+                                <div>
+                                  <span
+                                    className={`inline-block px-1.5 py-0.5 rounded font-mono text-[10px] font-extrabold mr-1.5 ${
+                                      pq.questionType === 'TYA'
+                                        ? 'bg-amber-500/15 text-amber-800 border border-amber-500/30'
+                                        : 'bg-[#0a6b3c]/15 text-[#0a6b3c]'
+                                    }`}
+                                  >
+                                    {pq.questionType || 'MCQ'}
+                                  </span>
+                                  <span className="font-bold text-black">
+                                    {idx + 1}. {pq.questionText}
+                                  </span>
+                                  {pq.questionType === 'TYA' && (
+                                    <div className="text-[10px] text-[#0a6b3c] font-bold mt-0.5">
+                                      Answer Key(s): {(pq.answerKeys || []).join(' | ')} • Mark:{' '}
+                                      {pq.mark || 1} • AI Eval:{' '}
+                                      {pq.allowAiEval !== false ? 'YES' : 'NO'}
+                                    </div>
+                                  )}
+                                </div>
+                              </div>
+                            ))}
+                          </div>
+                        </div>
+                      )}
+
+                      <button
+                        type="button"
+                        disabled={previewedBulkQuestions.length === 0}
+                        onClick={() => {
+                          if (previewedBulkQuestions.length === 0) return;
+                          previewedBulkQuestions.forEach((pq) => onAddQuestion(pq));
+                          const count = previewedBulkQuestions.length;
+                          setBulkQuestionPasteText('');
+                          setPreviewedBulkQuestions([]);
+                          triggerToast(
+                            `Uploaded ${count} question(s) to ${qSubject} Question Bank.`
+                          );
+                        }}
+                        className="w-full py-2.5 px-4 rounded-xl bg-[#0a6b3c] hover:bg-[#0e8a4e] disabled:opacity-40 text-white text-xs font-extrabold uppercase tracking-wider cursor-pointer"
+                      >
+                        + Bulk Import {previewedBulkQuestions.length || ''} Question(s) to{' '}
+                        {qSubject}
+                      </button>
+                    </div>
                   </div>
 
                   <div className="lg:col-span-7 p-6 rounded-2xl border border-neutral-200 bg-white text-black space-y-4">
-                    <div className="flex items-center justify-between">
+                    <div className="flex flex-wrap items-center justify-between gap-2">
                       <h2 className="text-base font-extrabold text-black">
                         {qSubject} Questions (
                         {questions.filter((q) => q.subject === qSubject).length})
                       </h2>
+                      <div className="flex items-center gap-2 text-xs font-bold">
+                        <span className="px-2.5 py-1 rounded-lg bg-[#0a6b3c]/10 text-[#0a6b3c]">
+                          MCQ:{' '}
+                          {
+                            questions.filter(
+                              (q) => q.subject === qSubject && q.questionType !== 'TYA'
+                            ).length
+                          }
+                        </span>
+                        <span className="px-2.5 py-1 rounded-lg bg-amber-500/15 text-amber-800 border border-amber-500/30">
+                          TYA:{' '}
+                          {
+                            questions.filter(
+                              (q) => q.subject === qSubject && q.questionType === 'TYA'
+                            ).length
+                          }
+                        </span>
+                      </div>
                     </div>
-                    <div className="space-y-3 max-h-[600px] overflow-y-auto pr-1">
+                    <div className="space-y-3 max-h-[760px] overflow-y-auto pr-1">
                       {questions
                         .filter((q) => q.subject === qSubject)
-                        .map((q, i) => (
-                          <div
-                            key={q.id}
-                            className="p-4 rounded-xl border border-neutral-200 bg-neutral-50 space-y-2"
-                          >
-                            <div className="flex items-center justify-between">
-                              <div className="flex items-center gap-2">
-                                <span className="px-2 py-0.5 rounded bg-[#0a6b3c] text-white font-mono text-[10px] font-bold">
-                                  #{i + 1} • {q.subject}
-                                </span>
-                                <span className="text-[11px] font-bold text-[#0a6b3c]">
-                                  Category: {q.category}
-                                </span>
-                              </div>
-                              <button
-                                type="button"
-                                onClick={() => onDeleteQuestion(q.id)}
-                                className="text-red-600 hover:text-red-800 p-1 cursor-pointer"
-                              >
-                                <Trash2 className="w-3.5 h-3.5" />
-                              </button>
-                            </div>
-                            <p className="text-xs font-bold text-black">{q.questionText}</p>
-                            <div className="grid grid-cols-2 gap-1.5 text-[11px]">
-                              {q.options.map((opt, oIdx) => (
-                                <div
-                                  key={oIdx}
-                                  className={`px-2.5 py-1 rounded ${
-                                    q.correctAnswer === oIdx
-                                      ? 'bg-[#0a6b3c] text-white font-bold'
-                                      : 'bg-white text-neutral-700 border border-neutral-200'
-                                  }`}
-                                >
-                                  {['A', 'B', 'C', 'D'][oIdx]}. {opt}
+                        .map((q, i) => {
+                          const isTya = q.questionType === 'TYA';
+                          return (
+                            <div
+                              key={q.id}
+                              className="p-4 rounded-xl border border-neutral-200 bg-neutral-50 space-y-2"
+                            >
+                              <div className="flex items-center justify-between gap-2">
+                                <div className="flex flex-wrap items-center gap-2">
+                                  <span className="px-2 py-0.5 rounded bg-[#0a6b3c] text-white font-mono text-[10px] font-bold">
+                                    #{i + 1} • {q.subject}
+                                  </span>
+                                  <span
+                                    className={`px-2 py-0.5 rounded font-mono text-[10px] font-extrabold ${
+                                      isTya
+                                        ? 'bg-amber-500 text-black'
+                                        : 'bg-[#0a6b3c]/15 text-[#0a6b3c]'
+                                    }`}
+                                  >
+                                    {isTya ? 'TYPE = TYA' : 'TYPE = MCQ'}
+                                  </span>
+                                  <span className="text-[11px] font-bold text-[#0a6b3c]">
+                                    Category: {q.category}
+                                  </span>
+                                  <span className="text-[11px] font-bold text-neutral-600">
+                                    • Mark: {q.mark || 1}
+                                  </span>
                                 </div>
-                              ))}
+                                <button
+                                  type="button"
+                                  onClick={() => onDeleteQuestion(q.id)}
+                                  className="text-red-600 hover:text-red-800 p-1 cursor-pointer"
+                                >
+                                  <Trash2 className="w-3.5 h-3.5" />
+                                </button>
+                              </div>
+                              <p className="text-xs font-bold text-black">{q.questionText}</p>
+                              {isTya ? (
+                                <div className="p-2.5 rounded-lg bg-white border border-[#0a6b3c]/30 flex flex-wrap items-center justify-between gap-2 text-[11px]">
+                                  <div>
+                                    <span className="font-bold text-neutral-500">
+                                      Answer Key(s):{' '}
+                                    </span>
+                                    <span className="font-extrabold text-[#0a6b3c]">
+                                      {(q.answerKeys && q.answerKeys.length > 0
+                                        ? q.answerKeys
+                                        : ['—']
+                                      ).join(' | ')}
+                                    </span>
+                                  </div>
+                                  <span
+                                    className={`px-2 py-0.5 rounded-full text-[10px] font-extrabold ${
+                                      q.allowAiEval !== false
+                                        ? 'bg-[#0a6b3c]/10 text-[#0a6b3c]'
+                                        : 'bg-neutral-200 text-neutral-700'
+                                    }`}
+                                  >
+                                    AI Evaluation: {q.allowAiEval !== false ? 'YES' : 'NO'}
+                                  </span>
+                                </div>
+                              ) : (
+                                <div className="grid grid-cols-2 gap-1.5 text-[11px]">
+                                  {q.options.map((opt, oIdx) => (
+                                    <div
+                                      key={oIdx}
+                                      className={`px-2.5 py-1 rounded ${
+                                        q.correctAnswer === oIdx
+                                          ? 'bg-[#0a6b3c] text-white font-bold'
+                                          : 'bg-white text-neutral-700 border border-neutral-200'
+                                      }`}
+                                    >
+                                      {['A', 'B', 'C', 'D'][oIdx]}. {opt}
+                                    </div>
+                                  ))}
+                                </div>
+                              )}
                             </div>
-                          </div>
-                        ))}
+                          );
+                        })}
                     </div>
                   </div>
                 </div>
@@ -4697,6 +5048,26 @@ SET value = EXCLUDED.value,
               </div>
             )}
           </div>
+        )}
+
+        {/* TAB: PERFORMANCE ANALYSIS (PURE STATISTICS WITH SCORE RANGE BREAKDOWN - NO NAMES) */}
+        {activeTab === 'Performance Analysis' && (
+          <PerformanceAnalysisPanel
+            results={results}
+            candidates={candidates}
+            settings={settings}
+            examCenters={examCenters}
+          />
+        )}
+
+        {/* TAB: EXAM SCHEDULE / TIME-TABLE (PER EXAMINATION CENTRE + GENERAL SCHEDULE) */}
+        {activeTab === 'Exam Schedule' && (
+          <ExamSchedulePanel
+            settings={settings}
+            examCenters={examCenters}
+            onUpdateSettings={onUpdateSettings}
+            onTriggerToast={triggerToast}
+          />
         )}
 
         {/* TAB 5: ANALYTICS */}
@@ -5600,6 +5971,62 @@ SET value = EXCLUDED.value,
                       <span
                         className={`w-12 h-6 rounded-full p-0.5 transition-colors flex items-center ${
                           Boolean(settings.requirePhotoCardDuringRegistration)
+                            ? 'bg-[#0a6b3c] justify-end'
+                            : 'bg-neutral-300 justify-start'
+                        }`}
+                      >
+                        <span className="w-5 h-5 rounded-full bg-white shadow-xs" />
+                      </span>
+                    </button>
+                  </div>
+
+                  {/* Toggle 5: Enable AI Evaluation for TYA */}
+                  <div className="p-4 rounded-2xl border border-neutral-200 bg-neutral-50 flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+                    <div className="space-y-1">
+                      <div className="flex items-center gap-2">
+                        <span className="text-sm font-extrabold text-black">
+                          Enable AI Evaluation for TYA (&quot;Type Your Answers&quot;)
+                        </span>
+                        <span
+                          className={`px-2 py-0.5 rounded-full text-[10px] font-extrabold uppercase ${
+                            settings.enableAiEvaluationForTya !== false
+                              ? 'bg-[#0a6b3c] text-white'
+                              : 'bg-neutral-200 text-neutral-700'
+                          }`}
+                        >
+                          {settings.enableAiEvaluationForTya !== false ? 'ENABLED' : 'DISABLED'}
+                        </span>
+                      </div>
+                      <p className="text-xs text-neutral-600">
+                        When ON (default), TYA responses that do not match the exact Answer Key string are automatically evaluated by the AI Examiner for scientific equivalence, synonyms, and spelling variations (e.g.,{' '}
+                        <span className="font-bold text-[#0a6b3c]">
+                          Thylakoid membrane = Grana
+                        </span>
+                        ).
+                      </p>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        const nextVal = !(settings.enableAiEvaluationForTya !== false);
+                        onUpdateSettings({
+                          ...settings,
+                          enableAiEvaluationForTya: nextVal,
+                        });
+                        triggerToast(
+                          nextVal
+                            ? 'AI Evaluation for TYA: ON (Scientific equivalence & AI explanations enabled).'
+                            : 'AI Evaluation for TYA: OFF (Exact string match only).'
+                        );
+                      }}
+                      className="inline-flex items-center gap-3 px-4 py-2.5 rounded-xl border-2 border-[#0a6b3c] bg-white hover:bg-[#0a6b3c]/10 transition-colors cursor-pointer shrink-0 self-start sm:self-center"
+                    >
+                      <span className="text-xs font-extrabold uppercase tracking-wider text-black">
+                        {settings.enableAiEvaluationForTya !== false ? 'ON' : 'OFF'}
+                      </span>
+                      <span
+                        className={`w-12 h-6 rounded-full p-0.5 transition-colors flex items-center ${
+                          settings.enableAiEvaluationForTya !== false
                             ? 'bg-[#0a6b3c] justify-end'
                             : 'bg-neutral-300 justify-start'
                         }`}
@@ -6555,6 +6982,16 @@ SET value = EXCLUDED.value,
                               ? 'Unpublish Ranking'
                               : 'Publish Ranking'}
                           </span>
+                        </button>
+
+                        <button
+                          type="button"
+                          onClick={() => setActiveTab('Exam Schedule')}
+                          className="px-3.5 py-2 rounded-xl border-2 border-[#0a6b3c] bg-[#0a6b3c]/10 hover:bg-[#0a6b3c] hover:text-white text-[#0a6b3c] text-xs font-extrabold flex items-center gap-1.5 cursor-pointer transition-colors"
+                          title="Configure General or Per-Centre Exam Schedule for this test"
+                        >
+                          <Calendar className="w-3.5 h-3.5" />
+                          <span>Manage Schedule</span>
                         </button>
 
                         <button
@@ -8476,6 +8913,150 @@ SET value = EXCLUDED.value,
                   </div>
                 </div>
 
+                {/* Attempted Questions & AI Evaluation Breakdown */}
+                {(() => {
+                  const attemptedItems = resolveAttemptedItemsForResult(
+                    viewingResult,
+                    questions
+                  );
+                  if (attemptedItems.length === 0) return null;
+                  return (
+                    <div className="space-y-2.5 pt-2 border-t border-neutral-200">
+                      <div className="flex items-center justify-between">
+                        <h3 className="text-xs font-extrabold uppercase tracking-wider text-[#0a6b3c]">
+                          Attempt Review &amp; AI Explanations ({attemptedItems.length})
+                        </h3>
+                        <span className="text-[11px] font-bold text-neutral-500">
+                          MCQ + TYA
+                        </span>
+                      </div>
+                      <div className="max-h-64 overflow-y-auto space-y-2 pr-1">
+                        {attemptedItems.map((item, idx) => {
+                          const isTya = item.questionType === 'TYA';
+                          const isCorrect = isTya
+                            ? Boolean(item.isCorrect)
+                            : item.selectedAnswer === item.correctAnswer;
+                          const expKey = `${viewingResult.id}-${item.id}-${idx}`;
+                          const isExpanded = Boolean(expandedAiExplanations[expKey]);
+                          const candidateAns = isTya
+                            ? item.typedAnswer || '(No Answer Typed)'
+                            : item.selectedAnswer !== null &&
+                              item.selectedAnswer !== undefined &&
+                              item.options[item.selectedAnswer]
+                            ? `${['A', 'B', 'C', 'D'][item.selectedAnswer]}. ${
+                                item.options[item.selectedAnswer]
+                              }`
+                            : 'Not Answered';
+                          const officialKey = isTya
+                            ? (item.answerKeys && item.answerKeys.length > 0
+                                ? item.answerKeys
+                                : ['—']
+                              ).join(' / ')
+                            : item.options[item.correctAnswer]
+                            ? `${['A', 'B', 'C', 'D'][item.correctAnswer]}. ${
+                                item.options[item.correctAnswer]
+                              }`
+                            : '—';
+                          const maxM = item.maxMarks || 1;
+                          const awardedM =
+                            typeof item.marksAwarded === 'number'
+                              ? item.marksAwarded
+                              : isCorrect
+                              ? maxM
+                              : 0;
+
+                          return (
+                            <div
+                              key={`${item.id}-${idx}`}
+                              className={`p-3 rounded-xl border text-xs space-y-1.5 ${
+                                isCorrect
+                                  ? 'bg-[#0a6b3c]/5 border-[#0a6b3c]/30'
+                                  : 'bg-red-50/70 border-red-200'
+                              }`}
+                            >
+                              <div className="flex items-start justify-between gap-2">
+                                <div className="font-bold text-black">
+                                  <span className="font-extrabold text-[#0a6b3c] mr-1">
+                                    Q{idx + 1} ({item.subject} • {isTya ? 'TYA' : 'MCQ'}):
+                                  </span>
+                                  {item.questionText}
+                                </div>
+                                <span
+                                  className={`px-2 py-0.5 rounded-full text-[10px] font-extrabold shrink-0 ${
+                                    isCorrect
+                                      ? 'bg-[#0a6b3c] text-white'
+                                      : 'bg-red-600 text-white'
+                                  }`}
+                                >
+                                  {isCorrect ? '✓ CORRECT' : '✗ WRONG'} ({awardedM}/{maxM})
+                                </span>
+                              </div>
+                              <div className="text-[11px] space-y-0.5">
+                                <div>
+                                  <span className="text-neutral-500 font-semibold">
+                                    Candidate Answer:{' '}
+                                  </span>
+                                  <span
+                                    className={`font-bold ${
+                                      isCorrect ? 'text-[#0a6b3c]' : 'text-red-600'
+                                    }`}
+                                  >
+                                    {candidateAns}
+                                  </span>
+                                </div>
+                                <div>
+                                  <span className="text-neutral-500 font-semibold">
+                                    Answer Key:{' '}
+                                  </span>
+                                  <span className="font-bold text-black">{officialKey}</span>
+                                </div>
+                                {isTya && (
+                                  <div>
+                                    <span className="text-neutral-500 font-semibold">
+                                      AI Evaluation:{' '}
+                                    </span>
+                                    <span
+                                      className={`font-extrabold ${
+                                        isCorrect ? 'text-[#0a6b3c]' : 'text-red-600'
+                                      }`}
+                                    >
+                                      {isCorrect ? 'CORRECT' : 'WRONG'}
+                                    </span>
+                                  </div>
+                                )}
+                              </div>
+
+                              {item.aiExplanation && (
+                                <div className="pt-1">
+                                  <button
+                                    type="button"
+                                    onClick={() =>
+                                      setExpandedAiExplanations((prev) => ({
+                                        ...prev,
+                                        [expKey]: !prev[expKey],
+                                      }))
+                                    }
+                                    className="text-[11px] font-extrabold text-[#0a6b3c] hover:underline cursor-pointer"
+                                  >
+                                    {isExpanded
+                                      ? 'Hide AI Explanation ▲'
+                                      : 'View AI Explanation ▼'}
+                                  </button>
+                                  {isExpanded && (
+                                    <div className="mt-1.5 p-2.5 rounded-lg bg-white border border-neutral-200 text-[11px] italic text-neutral-700">
+                                      {item.aiExplanation}
+                                    </div>
+                                  )}
+                                </div>
+                              )}
+                            </div>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  );
+                })()}
+
                 {/* Action Buttons */}
                 <div className="space-y-2 pt-1">
                   <button
@@ -8494,16 +9075,36 @@ SET value = EXCLUDED.value,
                     <span>Download Result Slip PDF</span>
                   </button>
 
-                  <button
-                    type="button"
-                    onClick={() =>
-                      downloadCandidateQuestionsPdf(viewingResult, settings, questions)
-                    }
-                    className="w-full py-3 px-4 rounded-xl bg-white hover:bg-[#0a6b3c]/5 border border-[#0a6b3c] text-[#0a6b3c] text-xs font-extrabold flex items-center justify-center gap-2 transition-colors cursor-pointer"
-                  >
-                    <Download className="w-4 h-4" />
-                    <span>Download Attempted Questions PDF</span>
-                  </button>
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                    <button
+                      type="button"
+                      onClick={() =>
+                        downloadAttemptWithAiExplanationsPdf(
+                          viewingResult,
+                          settings,
+                          questions
+                        )
+                      }
+                      className="py-2.5 px-3 rounded-xl bg-white hover:bg-[#0a6b3c]/5 border border-[#0a6b3c] text-[#0a6b3c] text-xs font-extrabold flex items-center justify-center gap-1.5 transition-colors cursor-pointer"
+                    >
+                      <Download className="w-3.5 h-3.5" />
+                      <span>Attempt PDF (AI Eval)</span>
+                    </button>
+
+                    <button
+                      type="button"
+                      onClick={() =>
+                        downloadAttemptWithAiExplanationsExcelCsv(
+                          viewingResult,
+                          questions
+                        )
+                      }
+                      className="py-2.5 px-3 rounded-xl bg-white hover:bg-[#0a6b3c]/5 border border-[#0a6b3c] text-[#0a6b3c] text-xs font-extrabold flex items-center justify-center gap-1.5 transition-colors cursor-pointer"
+                    >
+                      <FileSpreadsheet className="w-3.5 h-3.5" />
+                      <span>Attempt Excel (CSV)</span>
+                    </button>
+                  </div>
 
                   <div className="grid grid-cols-2 gap-2 pt-1">
                     <button

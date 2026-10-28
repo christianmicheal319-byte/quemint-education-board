@@ -51,6 +51,11 @@ import {
   isExamRankingPublished,
   resolveResultSlipFieldRows,
 } from './utils/pdfSlipGenerator';
+import {
+  downloadAttemptWithAiExplanationsExcelCsv,
+  downloadAttemptWithAiExplanationsPdf,
+  resolveAttemptedItemsForResult,
+} from './utils/tyaEvaluator';
 import { getCandidateHdPortraitUrl } from './utils/liveProctoringBus';
 
 type AppView = 'login' | 'registration' | 'exam' | 'result' | 'admin';
@@ -91,7 +96,13 @@ export default function App() {
   const [questions, setQuestions] = useState<Question[]>(() => {
     try {
       const saved = localStorage.getItem('quemint_questions_v4');
-      return saved ? JSON.parse(saved) : INITIAL_QUESTIONS;
+      if (saved) {
+        const parsed: Question[] = JSON.parse(saved);
+        const existingIds = new Set(parsed.map((q) => q.id));
+        const missingInitial = INITIAL_QUESTIONS.filter((q) => !existingIds.has(q.id));
+        return missingInitial.length > 0 ? [...parsed, ...missingInitial] : parsed;
+      }
+      return INITIAL_QUESTIONS;
     } catch {
       return INITIAL_QUESTIONS;
     }
@@ -100,11 +111,28 @@ export default function App() {
   const [results, setResults] = useState<ExamResult[]>(() => {
     try {
       const saved = localStorage.getItem('quemint_results_v4');
-      return saved ? JSON.parse(saved) : INITIAL_RESULTS;
+      if (saved) {
+        const parsed: ExamResult[] = JSON.parse(saved);
+        return parsed.map((r) => {
+          const initialMatch = INITIAL_RESULTS.find((ir) => ir.id === r.id);
+          if (
+            initialMatch?.attemptedRecord &&
+            (!r.attemptedRecord || r.attemptedRecord.length === 0)
+          ) {
+            return { ...r, attemptedRecord: initialMatch.attemptedRecord };
+          }
+          return r;
+        });
+      }
+      return INITIAL_RESULTS;
     } catch {
       return INITIAL_RESULTS;
     }
   });
+
+  const [expandedResultAiExplanations, setExpandedResultAiExplanations] = useState<
+    Record<string, boolean>
+  >({});
 
   const [settings, setSettings] = useState<ExamSettings>(() => {
     try {
@@ -722,7 +750,11 @@ export default function App() {
   };
 
   const handleDownloadAttemptedQuestions = (res: ExamResult) => {
-    downloadCandidateQuestionsPdf(res, settings, questions);
+    downloadAttemptWithAiExplanationsPdf(res, settings, questions);
+  };
+
+  const handleDownloadAttemptedExcel = (res: ExamResult) => {
+    downloadAttemptWithAiExplanationsExcelCsv(res, questions);
   };
 
   // Render Registration View
@@ -1317,16 +1349,203 @@ export default function App() {
                     </strong>
                   </div>
                 </div>
-                <button
-                  type="button"
-                  onClick={() => setShowResultSlipOverlay(true)}
-                  className="px-4 py-2 rounded-xl bg-[#0a6b3c]/10 text-[#0a6b3c] text-xs font-extrabold cursor-pointer shrink-0"
-                >
-                  Open Slip
-                </button>
+                <div className="flex flex-wrap items-center gap-2 shrink-0">
+                  <button
+                    type="button"
+                    onClick={() => handleDownloadAttemptedQuestions(activeExamResult)}
+                    className="px-3.5 py-2 rounded-xl border border-[#0a6b3c] text-[#0a6b3c] hover:bg-[#0a6b3c]/10 text-xs font-extrabold flex items-center gap-1.5 cursor-pointer"
+                  >
+                    <Download className="w-3.5 h-3.5" />
+                    <span>Attempt PDF</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => handleDownloadAttemptedExcel(activeExamResult)}
+                    className="px-3.5 py-2 rounded-xl border border-[#0a6b3c] text-[#0a6b3c] hover:bg-[#0a6b3c]/10 text-xs font-extrabold flex items-center gap-1.5 cursor-pointer"
+                  >
+                    <Download className="w-3.5 h-3.5" />
+                    <span>Attempt Excel</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setShowResultSlipOverlay(true)}
+                    className="px-4 py-2 rounded-xl bg-[#0a6b3c]/10 text-[#0a6b3c] text-xs font-extrabold cursor-pointer"
+                  >
+                    Open Slip
+                  </button>
+                </div>
               </div>
             </div>
           </div>
+
+          {/* Question Review & AI Evaluation Breakdown Card (Green check ✓ if correct, Red X ✗ if wrong, expandable "View AI Explanation") */}
+          {(() => {
+            const attemptedItems = resolveAttemptedItemsForResult(
+              activeExamResult,
+              questions
+            );
+            if (attemptedItems.length === 0) return null;
+            return (
+              <div className="rounded-3xl bg-white border border-neutral-200 p-6 shadow-xs space-y-4">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <div>
+                    <h2 className="text-base font-extrabold text-black">
+                      Attempted Questions &amp; AI Evaluation Review
+                    </h2>
+                    <p className="text-xs text-neutral-500">
+                      Includes Multiple Choice (MCQ) and Type Your Answers (TYA) with scientific AI Evaluation explanations
+                    </p>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <button
+                      type="button"
+                      onClick={() => handleDownloadAttemptedQuestions(activeExamResult)}
+                      className="px-3 py-1.5 rounded-xl bg-[#0a6b3c] hover:bg-[#0e8a4e] text-white text-xs font-extrabold flex items-center gap-1.5 cursor-pointer"
+                    >
+                      <Download className="w-3.5 h-3.5" />
+                      <span>Download Attempt PDF</span>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => handleDownloadAttemptedExcel(activeExamResult)}
+                      className="px-3 py-1.5 rounded-xl border border-[#0a6b3c] text-[#0a6b3c] hover:bg-[#0a6b3c]/10 text-xs font-extrabold flex items-center gap-1.5 cursor-pointer"
+                    >
+                      <Download className="w-3.5 h-3.5" />
+                      <span>Download Excel (CSV)</span>
+                    </button>
+                  </div>
+                </div>
+
+                <div className="space-y-3 max-h-[540px] overflow-y-auto pr-1">
+                  {attemptedItems.map((item, idx) => {
+                    const isTya = item.questionType === 'TYA';
+                    const isCorrect = isTya
+                      ? Boolean(item.isCorrect)
+                      : item.selectedAnswer === item.correctAnswer;
+                    const expKey = `res-${activeExamResult.id}-${item.id}-${idx}`;
+                    const isExpanded = Boolean(expandedResultAiExplanations[expKey]);
+                    const candidateAns = isTya
+                      ? item.typedAnswer || '(No Answer Typed)'
+                      : item.selectedAnswer !== null &&
+                        item.selectedAnswer !== undefined &&
+                        item.options[item.selectedAnswer]
+                      ? `${['A', 'B', 'C', 'D'][item.selectedAnswer]}. ${
+                          item.options[item.selectedAnswer]
+                        }`
+                      : 'Not Answered';
+                    const officialKey = isTya
+                      ? (item.answerKeys && item.answerKeys.length > 0
+                          ? item.answerKeys
+                          : ['—']
+                        ).join(' / ')
+                      : item.options[item.correctAnswer]
+                      ? `${['A', 'B', 'C', 'D'][item.correctAnswer]}. ${
+                          item.options[item.correctAnswer]
+                        }`
+                      : '—';
+                    const maxM = item.maxMarks || 1;
+                    const awardedM =
+                      typeof item.marksAwarded === 'number'
+                        ? item.marksAwarded
+                        : isCorrect
+                        ? maxM
+                        : 0;
+
+                    return (
+                      <div
+                        key={`${item.id}-${idx}`}
+                        className={`p-4 rounded-2xl border text-xs space-y-2 ${
+                          isCorrect
+                            ? 'bg-[#0a6b3c]/5 border-[#0a6b3c]/30'
+                            : 'bg-red-50/70 border-red-200'
+                        }`}
+                      >
+                        <div className="flex items-start justify-between gap-3">
+                          <div className="font-bold text-black leading-relaxed">
+                            <span className="font-extrabold text-[#0a6b3c] mr-1.5">
+                              Q{idx + 1} ({item.subject} • {isTya ? 'TYA' : 'MCQ'}):
+                            </span>
+                            {item.questionText}
+                          </div>
+                          <span
+                            className={`px-2.5 py-1 rounded-full text-[11px] font-extrabold shrink-0 inline-flex items-center gap-1 ${
+                              isCorrect
+                                ? 'bg-[#0a6b3c] text-white'
+                                : 'bg-red-600 text-white'
+                            }`}
+                          >
+                            <span>{isCorrect ? '✓' : '✗'}</span>
+                            <span>
+                              {isCorrect ? 'CORRECT' : 'WRONG'} ({awardedM}/{maxM})
+                            </span>
+                          </span>
+                        </div>
+
+                        <div className="grid grid-cols-1 sm:grid-cols-3 gap-2 pt-1 text-[11px]">
+                          <div className="p-2 rounded-lg bg-white border border-neutral-200">
+                            <div className="text-neutral-500 font-semibold">
+                              Candidate Answer
+                            </div>
+                            <div
+                              className={`font-extrabold mt-0.5 ${
+                                isCorrect ? 'text-[#0a6b3c]' : 'text-red-600'
+                              }`}
+                            >
+                              {candidateAns}
+                            </div>
+                          </div>
+                          <div className="p-2 rounded-lg bg-white border border-neutral-200">
+                            <div className="text-neutral-500 font-semibold">
+                              Answer Key
+                            </div>
+                            <div className="font-extrabold text-black mt-0.5">
+                              {officialKey}
+                            </div>
+                          </div>
+                          <div className="p-2 rounded-lg bg-white border border-neutral-200">
+                            <div className="text-neutral-500 font-semibold">
+                              {isTya ? 'AI Evaluation' : 'Marking Status'}
+                            </div>
+                            <div
+                              className={`font-extrabold mt-0.5 ${
+                                isCorrect ? 'text-[#0a6b3c]' : 'text-red-600'
+                              }`}
+                            >
+                              {isCorrect ? 'CORRECT' : 'WRONG'} • Marks: {awardedM}/{maxM}
+                            </div>
+                          </div>
+                        </div>
+
+                        {item.aiExplanation && (
+                          <div className="pt-1">
+                            <button
+                              type="button"
+                              onClick={() =>
+                                setExpandedResultAiExplanations((prev) => ({
+                                  ...prev,
+                                  [expKey]: !prev[expKey],
+                                }))
+                              }
+                              className="px-3 py-1 rounded-lg bg-[#0a6b3c]/10 hover:bg-[#0a6b3c]/20 text-[#0a6b3c] text-[11px] font-extrabold cursor-pointer"
+                            >
+                              {isExpanded
+                                ? 'Hide AI Explanation ▲'
+                                : 'View AI Explanation ▼'}
+                            </button>
+                            {isExpanded && (
+                              <div className="mt-2 p-3 rounded-xl bg-white border border-[#0a6b3c]/30 text-xs italic text-neutral-700 leading-relaxed">
+                                {item.aiExplanation}
+                              </div>
+                            )}
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            );
+          })()}
         </div>
 
         {/* FOREGROUND RESULT MODAL (Matches Reference Screenshot 2 in Quemint Green & White) */}

@@ -27,8 +27,12 @@ export interface LiveCandidateTelemetry {
 }
 
 const STORAGE_KEY = 'quemint_live_proctoring_telemetry_v2';
+const FRAMES_STORAGE_KEY = 'quemint_live_proctoring_frames_v2';
 const CHANNEL_NAME = 'quemint_live_proctoring_channel_v2';
+const LOCAL_EVENT_NAME = 'quemint_live_proctoring_local_event_v2';
 const DEVICE_ID_KEY = 'quemint_device_id_v1';
+
+export const LIVE_SESSION_ACTIVE_WINDOW_MS = 10 * 60 * 1000; // 10 minutes active exam session window
 
 export function getLocalDeviceId(): string {
   try {
@@ -68,9 +72,44 @@ export function getSavedLiveTelemetryMap(): Record<string, LiveCandidateTelemetr
   try {
     const raw = localStorage.getItem(STORAGE_KEY);
     if (!raw) return {};
-    return JSON.parse(raw);
+    const parsed = JSON.parse(raw);
+    return parsed && typeof parsed === 'object' ? parsed : {};
   } catch {
     return {};
+  }
+}
+
+export function getSavedLiveFramesMap(): Record<string, string> {
+  try {
+    const raw = localStorage.getItem(FRAMES_STORAGE_KEY);
+    if (!raw) return {};
+    const parsed = JSON.parse(raw);
+    return parsed && typeof parsed === 'object' ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
+function saveLiveFrameToStorage(candidateId: string, liveFrameDataUrl: string): void {
+  if (!candidateId || !liveFrameDataUrl) return;
+  try {
+    const frames = getSavedLiveFramesMap();
+    frames[candidateId] = liveFrameDataUrl;
+    const keys = Object.keys(frames);
+    if (keys.length > 8) {
+      delete frames[keys[0]];
+    }
+    localStorage.setItem(FRAMES_STORAGE_KEY, JSON.stringify(frames));
+  } catch {
+    // If quota exceeded, store only the latest active candidate's frame
+    try {
+      localStorage.setItem(
+        FRAMES_STORAGE_KEY,
+        JSON.stringify({ [candidateId]: liveFrameDataUrl })
+      );
+    } catch {
+      // Ignore storage errors
+    }
   }
 }
 
@@ -102,10 +141,16 @@ export function publishCandidateLiveTelemetry(telemetry: LiveCandidateTelemetry)
     current[telemetry.candidateId] = enriched;
     localStorage.setItem(STORAGE_KEY, JSON.stringify(current));
 
+    const message = { type: 'TELEMETRY_UPDATE', payload: enriched };
+
     if (typeof BroadcastChannel !== 'undefined') {
       const bc = new BroadcastChannel(CHANNEL_NAME);
-      bc.postMessage({ type: 'TELEMETRY_UPDATE', payload: enriched });
+      bc.postMessage(message);
       bc.close();
+    }
+
+    if (typeof window !== 'undefined') {
+      window.dispatchEvent(new CustomEvent(LOCAL_EVENT_NAME, { detail: message }));
     }
 
     if (typeof fetch !== 'undefined' && telemetry.isLiveFromExamTab) {
@@ -126,7 +171,7 @@ export function publishCandidateLiveTelemetry(telemetry: LiveCandidateTelemetry)
 
 /**
  * Publishes a live real-time webcam frame captured from a student taking an exam in ExamInterface.tsx
- * via both BroadcastChannel (0ms cross-tab) and /api/proctoring/publish (cross-device).
+ * via localStorage, same-tab CustomEvent, BroadcastChannel (0ms cross-tab), and /api/proctoring/publish (cross-device).
  */
 export function publishCandidateLiveFrame(
   candidateId: string,
@@ -135,17 +180,64 @@ export function publishCandidateLiveFrame(
 ): void {
   try {
     const senderDeviceId = getLocalDeviceId();
+    const now = Date.now();
+    let enrichedTelemetry = telemetry;
+
+    if (telemetry) {
+      const current = getSavedLiveTelemetryMap();
+      const prev = current[candidateId];
+      let lastTransition = prev?.lastTransition || null;
+      let lastTransitionAt = prev?.lastTransitionAt || undefined;
+
+      if (prev) {
+        if (prev.accuracyPercent < 80 && telemetry.accuracyPercent >= 80) {
+          lastTransition = 'promoted-to-top';
+          lastTransitionAt = now;
+        } else if (prev.accuracyPercent >= 80 && telemetry.accuracyPercent < 80) {
+          lastTransition = 'dropped-below-80';
+          lastTransitionAt = now;
+        }
+      }
+
+      enrichedTelemetry = {
+        ...telemetry,
+        isLiveFromExamTab: true,
+        cameraActive: true,
+        senderDeviceId: telemetry.senderDeviceId || senderDeviceId,
+        lastTransition,
+        lastTransitionAt,
+        lastUpdated: now,
+      };
+
+      current[candidateId] = enrichedTelemetry;
+      try {
+        localStorage.setItem(STORAGE_KEY, JSON.stringify(current));
+      } catch {
+        // Ignore quota errors
+      }
+    }
+
+    if (liveFrameDataUrl) {
+      saveLiveFrameToStorage(candidateId, liveFrameDataUrl);
+    }
+
+    const message = {
+      type: 'LIVE_FRAME_UPDATE',
+      candidateId,
+      liveFrameDataUrl,
+      telemetry: enrichedTelemetry,
+      senderDeviceId,
+      updatedAt: now,
+    };
+
     if (typeof BroadcastChannel !== 'undefined') {
       const bc = new BroadcastChannel(CHANNEL_NAME);
-      bc.postMessage({
-        type: 'LIVE_FRAME_UPDATE',
-        candidateId,
-        liveFrameDataUrl,
-        telemetry,
-        senderDeviceId,
-        updatedAt: Date.now(),
-      });
+      bc.postMessage(message);
       bc.close();
+    }
+
+    if (typeof window !== 'undefined') {
+      window.dispatchEvent(new CustomEvent(LOCAL_EVENT_NAME, { detail: message }));
     }
 
     if (typeof fetch !== 'undefined') {
@@ -156,7 +248,7 @@ export function publishCandidateLiveFrame(
           candidateId,
           senderDeviceId,
           liveFrameDataUrl,
-          telemetry,
+          telemetry: enrichedTelemetry,
         }),
       }).catch(() => {});
     }
@@ -166,7 +258,7 @@ export function publishCandidateLiveFrame(
 }
 
 /**
- * Immediately unpublishes a candidate's live camera stream when they exit or submit the exam.
+ * Immediately unpublishes a candidate's live camera stream when they submit the exam.
  */
 export function unpublishCandidateLiveStream(candidateId: string): void {
   try {
@@ -181,13 +273,29 @@ export function unpublishCandidateLiveStream(candidateId: string): void {
       localStorage.setItem(STORAGE_KEY, JSON.stringify(current));
     }
 
+    try {
+      const frames = getSavedLiveFramesMap();
+      if (frames[candidateId]) {
+        delete frames[candidateId];
+        localStorage.setItem(FRAMES_STORAGE_KEY, JSON.stringify(frames));
+      }
+    } catch {
+      // Ignore
+    }
+
+    const message = {
+      type: 'CANDIDATE_DISCONNECTED',
+      candidateId,
+    };
+
     if (typeof BroadcastChannel !== 'undefined') {
       const bc = new BroadcastChannel(CHANNEL_NAME);
-      bc.postMessage({
-        type: 'CANDIDATE_DISCONNECTED',
-        candidateId,
-      });
+      bc.postMessage(message);
       bc.close();
+    }
+
+    if (typeof window !== 'undefined') {
+      window.dispatchEvent(new CustomEvent(LOCAL_EVENT_NAME, { detail: message }));
     }
 
     if (typeof fetch !== 'undefined') {
@@ -213,36 +321,55 @@ export function subscribeToLiveProctoring(
 ): () => void {
   let bc: BroadcastChannel | null = null;
 
-  if (typeof BroadcastChannel !== 'undefined') {
-    bc = new BroadcastChannel(CHANNEL_NAME);
-    bc.onmessage = (event) => {
-      const msg = event.data;
-      if (msg?.type === 'LIVE_FRAME_UPDATE' && msg.candidateId && msg.liveFrameDataUrl) {
-        if (onLiveFrame) {
-          onLiveFrame(msg.candidateId, msg.liveFrameDataUrl, msg.telemetry);
-        }
-      } else if (msg?.type === 'CANDIDATE_DISCONNECTED' && msg.candidateId) {
-        onUpdate(getSavedLiveTelemetryMap());
-        if (onCandidateDisconnect) {
-          onCandidateDisconnect(msg.candidateId);
-        }
-      } else {
-        onUpdate(getSavedLiveTelemetryMap());
+  const handleIncomingMessage = (msg: any) => {
+    if (!msg) return;
+    if (msg.type === 'LIVE_FRAME_UPDATE' && msg.candidateId && msg.liveFrameDataUrl) {
+      if (onLiveFrame) {
+        onLiveFrame(msg.candidateId, msg.liveFrameDataUrl, msg.telemetry);
       }
-    };
-  }
-
-  const handleStorage = (e: StorageEvent) => {
-    if (e.key === STORAGE_KEY) {
+    } else if (msg.type === 'CANDIDATE_DISCONNECTED' && msg.candidateId) {
+      onUpdate(getSavedLiveTelemetryMap());
+      if (onCandidateDisconnect) {
+        onCandidateDisconnect(msg.candidateId);
+      }
+    } else {
       onUpdate(getSavedLiveTelemetryMap());
     }
   };
 
+  if (typeof BroadcastChannel !== 'undefined') {
+    bc = new BroadcastChannel(CHANNEL_NAME);
+    bc.onmessage = (event) => {
+      handleIncomingMessage(event.data);
+    };
+  }
+
+  const handleLocalEvent = (event: Event) => {
+    const customEvent = event as CustomEvent;
+    handleIncomingMessage(customEvent.detail);
+  };
+
+  const handleStorage = (e: StorageEvent) => {
+    if (e.key === STORAGE_KEY) {
+      onUpdate(getSavedLiveTelemetryMap());
+    } else if (e.key === FRAMES_STORAGE_KEY && onLiveFrame) {
+      const frames = getSavedLiveFramesMap();
+      const telMap = getSavedLiveTelemetryMap();
+      Object.entries(frames).forEach(([cid, frameUrl]) => {
+        if (frameUrl) {
+          onLiveFrame(cid, frameUrl, telMap[cid]);
+        }
+      });
+    }
+  };
+
   window.addEventListener('storage', handleStorage);
+  window.addEventListener(LOCAL_EVENT_NAME, handleLocalEvent);
 
   return () => {
     if (bc) bc.close();
     window.removeEventListener('storage', handleStorage);
+    window.removeEventListener(LOCAL_EVENT_NAME, handleLocalEvent);
   };
 }
 

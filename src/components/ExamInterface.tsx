@@ -42,6 +42,17 @@ import {
   publishCandidateLiveTelemetry,
   unpublishCandidateLiveStream,
 } from '../utils/liveProctoringBus';
+import {
+  evaluateTyaBatchWithServer,
+  evaluateTyaExactMatch,
+  TyaEvaluationBatchRequestItem,
+  TyaEvaluationResponseItem,
+} from '../utils/tyaEvaluator';
+import {
+  canAttemptExam,
+  ScheduleCheckResult,
+  useExamSchedule,
+} from '../utils/examSchedule';
 
 interface ExamInterfaceProps {
   candidate: Candidate;
@@ -67,8 +78,12 @@ function shuffleArray<T>(arr: T[]): T[] {
   return copy;
 }
 
-// Shuffle options (A-D) for a question while updating correctAnswer index accurately
+// Shuffle options (A-D) for an MCQ question while updating correctAnswer index accurately.
+// Never shuffle options for TYA (Type Your Answers) questions.
 function shuffleQuestionOptions(q: Question): Question {
+  if (q.questionType === 'TYA') {
+    return q;
+  }
   const correctOptionText = q.options[q.correctAnswer];
   const shuffledOpts = shuffleArray(q.options) as [string, string, string, string];
   const newCorrectIdx = Math.max(0, shuffledOpts.indexOf(correctOptionText)) as
@@ -337,6 +352,9 @@ export const ExamInterface: React.FC<ExamInterfaceProps> = ({
   const [activeSubject, setActiveSubject] = useState<string>(subjects[0] || 'English');
   const [subjQuestionIndex, setSubjQuestionIndex] = useState<number>(0);
   const [answers, setAnswers] = useState<Record<string, number>>({});
+  const [typedAnswers, setTypedAnswers] = useState<Record<string, string>>({});
+  const [isSubmittingAndEvaluating, setIsSubmittingAndEvaluating] =
+    useState<boolean>(false);
 
   const effectiveDurationMinutes =
     selectedTest?.durationMinutes ||
@@ -354,6 +372,52 @@ export const ExamInterface: React.FC<ExamInterfaceProps> = ({
   const [lostFocusWarning, setLostFocusWarning] = useState<boolean>(false);
 
   const [attemptLimitMessage, setAttemptLimitMessage] = useState<string>('');
+  const [scheduleBlockMessage, setScheduleBlockMessage] = useState<string>('');
+  const [scheduleAutoSubmitting, setScheduleAutoSubmitting] = useState<boolean>(false);
+
+  // Authoritative Server-Time Exam Schedule Enforcement Hook (Africa/Lagos WAT)
+  const activeScheduleCheck = useExamSchedule({
+    examCode: selectedTest?.testCode || availablePublishedTests[0]?.testCode || 'QMT3045B',
+    studentCenterId: candidate.examCenterId,
+    studentCenterName: candidate.examCenterName || 'Main Hall',
+    schedules: settings.examSchedules || [],
+    examCenters: settings.examCenters || [],
+  });
+
+  // Evaluate schedule status for any PublishedTest card in Candidate Portal
+  const getScheduleForTest = useCallback(
+    (test: PublishedTest): ScheduleCheckResult => {
+      return canAttemptExam({
+        studentExamCenterId: candidate.examCenterId,
+        studentExamCenterName: candidate.examCenterName || 'Main Hall',
+        examCode: test.testCode,
+        schedules: settings.examSchedules || [],
+        examCenters: settings.examCenters || [],
+        serverNowMs: activeScheduleCheck.serverNowMs,
+      });
+    },
+    [
+      candidate.examCenterId,
+      candidate.examCenterName,
+      settings.examSchedules,
+      settings.examCenters,
+      activeScheduleCheck.serverNowMs,
+    ]
+  );
+
+  // If Admin configured 'immediate' exam start flow, still block entry if schedule is upcoming or ended
+  useEffect(() => {
+    if (stage === 'live-exam' && !activeScheduleCheck.allowed && secondsLeft === effectiveDurationMinutes * 60) {
+      setStage('portal');
+      setScheduleBlockMessage(activeScheduleCheck.message);
+    }
+  }, [
+    stage,
+    activeScheduleCheck.allowed,
+    activeScheduleCheck.message,
+    secondsLeft,
+    effectiveDurationMinutes,
+  ]);
 
   // Automatically keep selectedTest and pooled questions synced whenever publishedTests, category, or subjectCombinations changes
   useEffect(() => {
@@ -405,7 +469,22 @@ export const ExamInterface: React.FC<ExamInterfaceProps> = ({
   );
 
   // Start a specific published test from the Candidate Portal
-  const handleSelectAndStartPublishedTest = (test: PublishedTest) => {
+  const handleSelectAndStartPublishedTest = async (test: PublishedTest) => {
+    // 1. Check Exam Schedule (Per-Centre first, then General) using authoritative server time
+    const localSchedCheck = getScheduleForTest(test);
+    if (!localSchedCheck.allowed) {
+      setScheduleBlockMessage(localSchedCheck.message);
+      return;
+    }
+
+    const serverVerifiedCheck = await activeScheduleCheck.verifyWithServerApi(
+      test.testCode
+    );
+    if (!serverVerifiedCheck.allowed) {
+      setScheduleBlockMessage(serverVerifiedCheck.message);
+      return;
+    }
+
     const candidateAttempts = getCandidateTestAttempts(test);
     const maxPermitted = Math.max(1, test.maxAttempts ?? 1);
     if (candidateAttempts.length >= maxPermitted) {
@@ -415,6 +494,7 @@ export const ExamInterface: React.FC<ExamInterfaceProps> = ({
       return;
     }
     setAttemptLimitMessage('');
+    setScheduleBlockMessage('');
     const pooled = buildPooledQuestionsForTest(test);
     const firstSubj = pooled[0]?.subject || 'English';
     setSelectedTest(test);
@@ -422,6 +502,7 @@ export const ExamInterface: React.FC<ExamInterfaceProps> = ({
     setActiveSubject(firstSubj);
     setSubjQuestionIndex(0);
     setAnswers({});
+    setTypedAnswers({});
     setSecondsLeft((test.durationMinutes || settings.durationMinutes || 30) * 60);
     try {
       window.history.pushState({}, '', `/exam/${candidate.id}`);
@@ -459,6 +540,15 @@ export const ExamInterface: React.FC<ExamInterfaceProps> = ({
     }, 1000);
     return () => clearInterval(timer);
   }, [stage, secondsLeft]);
+
+  // Auto-submit during live exam if the exam schedule (per-centre or general) reaches end_time
+  useEffect(() => {
+    if (stage !== 'live-exam') return;
+    if (activeScheduleCheck.status === 'ended' && !isSubmittingAndEvaluating && !scheduleAutoSubmitting) {
+      setScheduleAutoSubmitting(true);
+      handleFinalizeSubmission();
+    }
+  }, [stage, activeScheduleCheck.status, isSubmittingAndEvaluating, scheduleAutoSubmitting]);
 
   // Monitor fullscreen / tab focus during live exam
   useEffect(() => {
@@ -518,6 +608,7 @@ export const ExamInterface: React.FC<ExamInterfaceProps> = ({
   const [isRePoppingCamera, setIsRePoppingCamera] = useState<boolean>(false);
   const activeStreamRef = useRef<MediaStream | null>(null);
   const fallbackCleanupRef = useRef<(() => void) | null>(null);
+  const fallbackCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const rePopTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const browserDeniedOnceRef = useRef<boolean>(false);
   const floatingVideoRef = useRef<HTMLVideoElement | null>(null);
@@ -593,7 +684,7 @@ export const ExamInterface: React.FC<ExamInterfaceProps> = ({
       canvas.width = 640;
       canvas.height = 480;
       const ctx = canvas.getContext('2d');
-      if (!ctx || typeof canvas.captureStream !== 'function') return null;
+      if (!ctx) return null;
 
       const portraitImg = new Image();
       portraitImg.crossOrigin = 'anonymous';
@@ -640,12 +731,21 @@ export const ExamInterface: React.FC<ExamInterfaceProps> = ({
       };
 
       drawFrame();
+      fallbackCanvasRef.current = canvas;
       const timer = setInterval(drawFrame, 250);
-      const stream = canvas.captureStream(15);
+      const stream =
+        typeof canvas.captureStream === 'function'
+          ? canvas.captureStream(15)
+          : typeof MediaStream !== 'undefined'
+          ? new MediaStream()
+          : null;
 
       fallbackCleanupRef.current = () => {
         clearInterval(timer);
-        stream.getTracks().forEach((t) => t.stop());
+        fallbackCanvasRef.current = null;
+        if (stream) {
+          stream.getTracks().forEach((t) => t.stop());
+        }
       };
 
       return stream;
@@ -865,10 +965,10 @@ export const ExamInterface: React.FC<ExamInterfaceProps> = ({
     };
   }, [isCameraAccessRequired, requestLiveCameraAccess, triggerCameraPopupReopen]);
 
-  // Immediately unpublish live stream when candidate leaves ExamInterface
+  // Keep candidate session published while exam is in progress; unpublish happens in handleFinalizeSubmission
   useEffect(() => {
     return () => {
-      unpublishCandidateLiveStream(candidate.id);
+      // Do not wipe active proctoring feed on temporary view switch
     };
   }, [candidate.id]);
 
@@ -1050,15 +1150,40 @@ export const ExamInterface: React.FC<ExamInterfaceProps> = ({
     );
   };
 
+  // Helper to check if a question has been answered (MCQ option selected or TYA text typed)
+  const isQuestionAnswered = useCallback(
+    (q: Question): boolean => {
+      if (q.questionType === 'TYA') {
+        return Boolean(typedAnswers[q.id] && typedAnswers[q.id].trim().length > 0);
+      }
+      return answers[q.id] !== undefined;
+    },
+    [answers, typedAnswers]
+  );
+
   // Build real-time candidate telemetry snapshot
   const currentLiveTelemetry = useMemo<LiveCandidateTelemetry>(() => {
-    const answeredIds = Object.keys(answers);
-    const totalAnswered = answeredIds.length;
+    let totalAnswered = 0;
     let totalCorrect = 0;
 
     examQuestions.forEach((q) => {
-      if (answers[q.id] !== undefined && answers[q.id] === q.correctAnswer) {
-        totalCorrect += 1;
+      if (q.questionType === 'TYA') {
+        const typed = (typedAnswers[q.id] || '').trim();
+        if (typed.length > 0) {
+          totalAnswered += 1;
+          const keys =
+            q.answerKeys && q.answerKeys.length > 0
+              ? q.answerKeys
+              : [q.options[0] || ''];
+          if (evaluateTyaExactMatch(typed, keys).matched) {
+            totalCorrect += 1;
+          }
+        }
+      } else if (answers[q.id] !== undefined) {
+        totalAnswered += 1;
+        if (answers[q.id] === q.correctAnswer) {
+          totalCorrect += 1;
+        }
       }
     });
 
@@ -1090,6 +1215,7 @@ export const ExamInterface: React.FC<ExamInterfaceProps> = ({
     };
   }, [
     answers,
+    typedAnswers,
     examQuestions,
     candidate,
     candidatePortraitUrl,
@@ -1114,6 +1240,7 @@ export const ExamInterface: React.FC<ExamInterfaceProps> = ({
   }, [
     stage,
     answers,
+    typedAnswers,
     activeSubject,
     subjQuestionIndex,
     lostFocusWarning,
@@ -1121,70 +1248,175 @@ export const ExamInterface: React.FC<ExamInterfaceProps> = ({
     Boolean(liveCameraStream),
   ]);
 
-  // Relay real-time HD webcam frames & heartbeat telemetry to Admin Live Proctoring (Cross-Tab + Cross-Device)
+  // Relay real-time HD webcam frames & heartbeat telemetry to Admin Live Proctoring (Same-Tab, Cross-Tab + Cross-Device)
   useEffect(() => {
     if (settings.proctoringEnabled === false) return;
 
     const captureCanvas = document.createElement('canvas');
-    captureCanvas.width = 960;
-    captureCanvas.height = 540;
+    captureCanvas.width = 640;
+    captureCanvas.height = 360;
     const ctx = captureCanvas.getContext('2d');
 
-    // Dedicated offscreen video element so stage transitions never interrupt live frame streaming
+    const portraitImg = new Image();
+    portraitImg.crossOrigin = 'anonymous';
+    if (candidatePortraitUrl) {
+      portraitImg.src = candidatePortraitUrl;
+    }
+
+    // Dedicated hidden DOM video element so hardware MediaStream always decodes frames in all browsers
     const captureVideoEl = document.createElement('video');
     captureVideoEl.muted = true;
     captureVideoEl.playsInline = true;
     captureVideoEl.autoplay = true;
+    captureVideoEl.style.position = 'fixed';
+    captureVideoEl.style.left = '-9999px';
+    captureVideoEl.style.top = '-9999px';
+    captureVideoEl.style.width = '2px';
+    captureVideoEl.style.height = '2px';
+    captureVideoEl.style.opacity = '0';
+    captureVideoEl.style.pointerEvents = 'none';
+    if (typeof document !== 'undefined' && document.body) {
+      document.body.appendChild(captureVideoEl);
+    }
 
     if (liveCameraStream) {
       captureVideoEl.srcObject = liveCameraStream;
       captureVideoEl.play().catch(() => {});
     }
 
-    const frameInterval = setInterval(() => {
-      const activeVideo =
-        captureVideoEl.readyState >= 2
-          ? captureVideoEl
-          : floatingVideoRef.current && floatingVideoRef.current.readyState >= 2
-          ? floatingVideoRef.current
-          : null;
-
+    const captureAndPublishFrame = () => {
       const latestTel: LiveCandidateTelemetry = {
         ...latestTelemetryRef.current,
+        isLiveFromExamTab: true,
+        cameraActive: Boolean(liveCameraStream) || !isCameraAccessRequired,
         lastUpdated: Date.now(),
       };
 
-      if (activeVideo && ctx && liveCameraStream) {
-        try {
+      if (!ctx) {
+        publishCandidateLiveTelemetry(latestTel);
+        return;
+      }
+
+      const activeVideo =
+        floatingVideoRef.current &&
+        floatingVideoRef.current.readyState >= 1 &&
+        floatingVideoRef.current.videoWidth > 0
+          ? floatingVideoRef.current
+          : captureVideoEl.readyState >= 1 && captureVideoEl.videoWidth > 0
+          ? captureVideoEl
+          : null;
+
+      try {
+        if (activeVideo && liveCameraStream) {
           ctx.save();
           // Mirror horizontally to match natural front-camera orientation
           ctx.translate(captureCanvas.width, 0);
           ctx.scale(-1, 1);
           ctx.drawImage(activeVideo, 0, 0, captureCanvas.width, captureCanvas.height);
           ctx.restore();
-          const liveFrameDataUrl = captureCanvas.toDataURL('image/jpeg', 0.84);
+          const liveFrameDataUrl = captureCanvas.toDataURL('image/jpeg', 0.78);
           publishCandidateLiveFrame(candidate.id, liveFrameDataUrl, latestTel);
           return;
-        } catch {
-          // Fall through to telemetry heartbeat
         }
-      }
 
-      // Heartbeat telemetry if hardware camera is still warming up or unavailable
-      publishCandidateLiveTelemetry(latestTel);
-    }, 260);
+        if (fallbackCanvasRef.current) {
+          ctx.drawImage(
+            fallbackCanvasRef.current,
+            0,
+            0,
+            captureCanvas.width,
+            captureCanvas.height
+          );
+          const liveFrameDataUrl = captureCanvas.toDataURL('image/jpeg', 0.78);
+          publishCandidateLiveFrame(candidate.id, liveFrameDataUrl, latestTel);
+          return;
+        }
+
+        // Synthesize live workstation proctoring feed frame so Admin CCTV is never stuck waiting on frame initialization
+        ctx.fillStyle = '#062815';
+        ctx.fillRect(0, 0, captureCanvas.width, captureCanvas.height);
+
+        if (portraitImg.complete && portraitImg.naturalWidth > 0) {
+          ctx.save();
+          ctx.translate(captureCanvas.width, 0);
+          ctx.scale(-1, 1);
+          ctx.drawImage(portraitImg, 0, 0, captureCanvas.width, captureCanvas.height);
+          ctx.restore();
+        } else {
+          ctx.fillStyle = '#0a6b3c';
+          ctx.beginPath();
+          ctx.arc(captureCanvas.width / 2, captureCanvas.height / 2 - 18, 56, 0, Math.PI * 2);
+          ctx.fill();
+          ctx.fillStyle = '#ffffff';
+          ctx.font = 'bold 34px sans-serif';
+          ctx.textAlign = 'center';
+          ctx.textBaseline = 'middle';
+          const initials = `${(candidate.firstName || 'C')[0]}${(candidate.surname || 'A')[0]}`.toUpperCase();
+          ctx.fillText(initials, captureCanvas.width / 2, captureCanvas.height / 2 - 18);
+
+          ctx.font = 'bold 14px monospace';
+          ctx.fillStyle = '#a7f3d0';
+          ctx.fillText(
+            `${candidate.firstName} ${candidate.surname} • ${candidate.regNumber}`,
+            captureCanvas.width / 2,
+            captureCanvas.height / 2 + 56
+          );
+        }
+
+        // Bottom live proctoring telemetry timestamp overlay
+        ctx.fillStyle = 'rgba(0, 0, 0, 0.65)';
+        ctx.fillRect(12, captureCanvas.height - 38, 340, 26);
+        ctx.fillStyle = '#34d399';
+        ctx.font = 'bold 12px monospace';
+        ctx.textAlign = 'left';
+        ctx.textBaseline = 'middle';
+        ctx.fillText(
+          `LIVE CBT STREAM • ${new Date().toLocaleTimeString()}`,
+          20,
+          captureCanvas.height - 25
+        );
+
+        const liveFrameDataUrl = captureCanvas.toDataURL('image/jpeg', 0.78);
+        publishCandidateLiveFrame(candidate.id, liveFrameDataUrl, latestTel);
+      } catch {
+        publishCandidateLiveTelemetry(latestTel);
+      }
+    };
+
+    captureAndPublishFrame();
+    const frameInterval = setInterval(captureAndPublishFrame, 300);
 
     return () => {
       clearInterval(frameInterval);
       captureVideoEl.srcObject = null;
+      if (captureVideoEl.parentNode) {
+        captureVideoEl.parentNode.removeChild(captureVideoEl);
+      }
     };
-  }, [liveCameraStream, settings.proctoringEnabled, candidate.id]);
+  }, [
+    liveCameraStream,
+    settings.proctoringEnabled,
+    candidate.id,
+    candidate.firstName,
+    candidate.surname,
+    candidate.regNumber,
+    candidatePortraitUrl,
+    isCameraAccessRequired,
+  ]);
 
   const handleSelectOption = (optionIndex: number) => {
     if (!currentQuestion) return;
     setAnswers((prev) => ({
       ...prev,
       [currentQuestion.id]: optionIndex,
+    }));
+  };
+
+  const handleTypedAnswerChange = (textValue: string) => {
+    if (!currentQuestion) return;
+    setTypedAnswers((prev) => ({
+      ...prev,
+      [currentQuestion.id]: textValue,
     }));
   };
 
@@ -1226,7 +1458,10 @@ export const ExamInterface: React.FC<ExamInterfaceProps> = ({
     subjects.indexOf(activeSubject) === subjects.length - 1 &&
     subjQuestionIndex === currentSubjectQuestions.length - 1;
 
-  const handleFinalizeSubmission = () => {
+  const handleFinalizeSubmission = async () => {
+    if (isSubmittingAndEvaluating) return;
+    setIsSubmittingAndEvaluating(true);
+
     unpublishCandidateLiveStream(candidate.id);
     if (liveCameraStream) {
       liveCameraStream.getTracks().forEach((t) => t.stop());
@@ -1239,6 +1474,51 @@ export const ExamInterface: React.FC<ExamInterfaceProps> = ({
       // ignore
     }
 
+    // Core TYA Marking Logic:
+    // Step 1: Exact Match (No AI needed)
+    // Step 2: AI Evaluation (If exact match fails and AI Eval is enabled)
+    const aiEnabledGlobally = settings.enableAiEvaluationForTya !== false;
+    const tyaExactResults: Record<
+      string,
+      { matched: boolean; explanation: string; keys: string[] }
+    > = {};
+    const pendingAiItems: TyaEvaluationBatchRequestItem[] = [];
+
+    examQuestions.forEach((q) => {
+      if (q.questionType === 'TYA') {
+        const keys =
+          q.answerKeys && q.answerKeys.length > 0
+            ? q.answerKeys
+            : [q.options[0] || ''].filter(Boolean);
+        const candTyped = (typedAnswers[q.id] || '').trim();
+        const exact = evaluateTyaExactMatch(candTyped, keys);
+        tyaExactResults[q.id] = {
+          matched: exact.matched,
+          explanation: exact.explanation,
+          keys,
+        };
+
+        if (
+          !exact.matched &&
+          candTyped.length > 0 &&
+          aiEnabledGlobally &&
+          q.allowAiEval !== false
+        ) {
+          pendingAiItems.push({
+            id: q.id,
+            question: q.questionText,
+            answer_keys: keys,
+            candidate_answer: candTyped,
+          });
+        }
+      }
+    });
+
+    let aiEvalResultsMap: Record<string, TyaEvaluationResponseItem> = {};
+    if (pendingAiItems.length > 0) {
+      aiEvalResultsMap = await evaluateTyaBatchWithServer(pendingAiItems);
+    }
+
     const psychoConfig = settings.psychometric || DEFAULT_PSYCHOMETRIC_CONFIG;
     const maxSubjectCap = psychoConfig.enabled ? psychoConfig.maxSubjectScoreCap : 100;
 
@@ -1249,9 +1529,17 @@ export const ExamInterface: React.FC<ExamInterfaceProps> = ({
 
     subjects.forEach((subj) => {
       const subjQs = examQuestions.filter((q) => q.subject === subj);
-      const answersInOrder = subjQs.map((q) => ({
-        isCorrect: answers[q.id] === q.correctAnswer,
-      }));
+      const answersInOrder = subjQs.map((q) => {
+        if (q.questionType === 'TYA') {
+          const exactInfo = tyaExactResults[q.id];
+          const aiInfo = aiEvalResultsMap[q.id];
+          const isCorr = Boolean(exactInfo?.matched || aiInfo?.is_correct);
+          return { isCorrect: isCorr };
+        }
+        return {
+          isCorrect: answers[q.id] === q.correctAnswer,
+        };
+      });
 
       const finalSubjScore = calculateSetScore(
         answersInOrder,
@@ -1277,15 +1565,56 @@ export const ExamInterface: React.FC<ExamInterfaceProps> = ({
       };
 
       subjQs.forEach((q, idx) => {
-        const selected = answers[q.id] !== undefined ? answers[q.id] : null;
-        attemptedRecord.push({
-          subject: subj,
-          questionNumber: idx + 1,
-          questionText: q.questionText,
-          options: q.options,
-          selectedAnswer: selected,
-          correctAnswer: q.correctAnswer,
-        });
+        const maxM = q.mark || 1;
+        if (q.questionType === 'TYA') {
+          const candTyped = (typedAnswers[q.id] || '').trim();
+          const exactInfo = tyaExactResults[q.id];
+          const aiInfo = aiEvalResultsMap[q.id];
+          const keys = exactInfo?.keys || q.answerKeys || [q.options[0] || ''];
+          const isCorr = Boolean(exactInfo?.matched || aiInfo?.is_correct);
+          const wasAiEvaluated = Boolean(!exactInfo?.matched && aiInfo);
+          const explanation = exactInfo?.matched
+            ? exactInfo.explanation
+            : aiInfo?.explanation ||
+              (candTyped
+                ? `Candidate answered "${candTyped}". Official Answer Key: ${keys.join(' | ')}.`
+                : `No answer typed. Official Answer Key: ${keys.join(' | ')}.`);
+
+          attemptedRecord.push({
+            id: q.id,
+            subject: subj,
+            questionNumber: idx + 1,
+            questionText: q.questionText,
+            options: q.options,
+            selectedAnswer: null,
+            correctAnswer: q.correctAnswer,
+            questionType: 'TYA',
+            typedAnswer: candTyped,
+            answerKeys: keys,
+            isCorrect: isCorr,
+            aiEvaluated: wasAiEvaluated,
+            aiExplanation: explanation,
+            aiConfidence: aiInfo?.confidence,
+            marksAwarded: isCorr ? maxM : 0,
+            maxMarks: maxM,
+          });
+        } else {
+          const selected = answers[q.id] !== undefined ? answers[q.id] : null;
+          const isCorr = selected === q.correctAnswer;
+          attemptedRecord.push({
+            id: q.id,
+            subject: subj,
+            questionNumber: idx + 1,
+            questionText: q.questionText,
+            options: q.options,
+            selectedAnswer: selected,
+            correctAnswer: q.correctAnswer,
+            questionType: 'MCQ',
+            isCorrect: isCorr,
+            marksAwarded: isCorr ? maxM : 0,
+            maxMarks: maxM,
+          });
+        }
       });
     });
 
@@ -1314,6 +1643,7 @@ export const ExamInterface: React.FC<ExamInterfaceProps> = ({
       stateOfOrigin: candidate.stateOfOrigin,
       examCenterName: candidate.examCenterName,
       testId: selectedTest?.id,
+      testCode: selectedTest?.testCode || settings.testAccessCode,
       testTitle: selectedTest?.title || settings.resultTitles?.testSubtitle || 'Rapid Test',
       score: aggregateScore,
       maxAggregate,
@@ -1326,6 +1656,7 @@ export const ExamInterface: React.FC<ExamInterfaceProps> = ({
       submittedAt: new Date().toISOString(),
     };
 
+    setIsSubmittingAndEvaluating(false);
     onSubmitExam(newResult);
   };
 
@@ -1345,9 +1676,9 @@ export const ExamInterface: React.FC<ExamInterfaceProps> = ({
     return `${String(hrs).padStart(2, '0')}:${String(mins).padStart(2, '0')}:${String(rem).padStart(2, '0')}`;
   };
 
-  const answeredCount = Object.keys(answers).length;
-  const currentSubjectAnswered = currentSubjectQuestions.filter(
-    (q) => answers[q.id] !== undefined
+  const answeredCount = examQuestions.filter((q) => isQuestionAnswered(q)).length;
+  const currentSubjectAnswered = currentSubjectQuestions.filter((q) =>
+    isQuestionAnswered(q)
   ).length;
   const unansweredCount = Math.max(0, examQuestions.length - answeredCount);
 
@@ -1393,16 +1724,39 @@ export const ExamInterface: React.FC<ExamInterfaceProps> = ({
                 </h1>
               </div>
               <div className="flex items-center gap-2">
-                {availablePublishedTests[0] && (
-                  <button
-                    type="button"
-                    onClick={() => handleSelectAndStartPublishedTest(availablePublishedTests[0])}
-                    className="px-5 py-2.5 rounded-xl bg-[#0a6b3c] hover:bg-[#0e8a4e] text-white text-xs font-extrabold flex items-center gap-1.5 transition-colors cursor-pointer shadow-xs"
-                  >
-                    <Play className="w-3.5 h-3.5 fill-current" />
-                    <span>Start Exam Now</span>
-                  </button>
-                )}
+                {availablePublishedTests[0] && (() => {
+                  const firstSched = getScheduleForTest(availablePublishedTests[0]);
+                  if (!firstSched.allowed) {
+                    return (
+                      <button
+                        type="button"
+                        disabled
+                        className={`px-4 py-2.5 rounded-xl text-xs font-extrabold flex items-center gap-1.5 cursor-not-allowed ${
+                          firstSched.status === 'ended'
+                            ? 'bg-red-100 text-red-700 border border-red-300'
+                            : 'bg-amber-100 text-amber-900 border border-amber-300'
+                        }`}
+                      >
+                        <Lock className="w-3.5 h-3.5" />
+                        <span>
+                          {firstSched.status === 'ended'
+                            ? `Closed (${firstSched.endTimeFormatted})`
+                            : `Starts at ${firstSched.startTimeFormatted}`}
+                        </span>
+                      </button>
+                    );
+                  }
+                  return (
+                    <button
+                      type="button"
+                      onClick={() => handleSelectAndStartPublishedTest(availablePublishedTests[0])}
+                      className="px-5 py-2.5 rounded-xl bg-[#0a6b3c] hover:bg-[#0e8a4e] text-white text-xs font-extrabold flex items-center gap-1.5 transition-colors cursor-pointer shadow-xs"
+                    >
+                      <Play className="w-3.5 h-3.5 fill-current" />
+                      <span>Start Exam Now</span>
+                    </button>
+                  );
+                })()}
                 <button
                   type="button"
                   onClick={onExitExam}
@@ -1412,6 +1766,66 @@ export const ExamInterface: React.FC<ExamInterfaceProps> = ({
                 </button>
               </div>
             </div>
+
+            {/* STUDENT EXAM SCHEDULE STATUS CARD (Upcoming / Live Now / Closed) */}
+            {activeScheduleCheck.status !== 'no_schedule' && (
+              <div
+                className={`rounded-2xl border-2 p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-3 ${
+                  activeScheduleCheck.status === 'live'
+                    ? 'border-[#0a6b3c] bg-[#0a6b3c]/10 text-black'
+                    : activeScheduleCheck.status === 'upcoming'
+                    ? 'border-amber-400 bg-amber-50 text-amber-950'
+                    : 'border-red-500 bg-red-50 text-red-950'
+                }`}
+              >
+                <div className="space-y-1">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <span
+                      className={`px-2.5 py-0.5 rounded-full text-[10px] font-extrabold uppercase tracking-wider flex items-center gap-1.5 ${
+                        activeScheduleCheck.status === 'live'
+                          ? 'bg-[#0a6b3c] text-white'
+                          : activeScheduleCheck.status === 'upcoming'
+                          ? 'bg-amber-500 text-black'
+                          : 'bg-red-600 text-white'
+                      }`}
+                    >
+                      {activeScheduleCheck.status === 'live' && (
+                        <span className="w-1.5 h-1.5 rounded-full bg-emerald-300 animate-ping" />
+                      )}
+                      <span>
+                        {activeScheduleCheck.status === 'live'
+                          ? 'LIVE SCHEDULE WINDOW'
+                          : activeScheduleCheck.status === 'upcoming'
+                          ? 'SCHEDULED • NOT YET STARTED'
+                          : 'SCHEDULE CLOSED'}
+                      </span>
+                    </span>
+                    <span className="font-mono text-xs font-extrabold">
+                      {activeScheduleCheck.bannerText}
+                    </span>
+                  </div>
+                  <p className="text-xs font-bold leading-relaxed">
+                    {activeScheduleCheck.message}
+                  </p>
+                </div>
+              </div>
+            )}
+
+            {scheduleBlockMessage && (
+              <div className="p-4 rounded-2xl border-2 border-red-400 bg-red-50 text-red-900 text-xs font-extrabold flex items-center justify-between gap-3">
+                <div className="flex items-center gap-2">
+                  <AlertTriangle className="w-4 h-4 text-red-600 shrink-0" />
+                  <span>{scheduleBlockMessage}</span>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setScheduleBlockMessage('')}
+                  className="text-xs underline cursor-pointer shrink-0"
+                >
+                  Dismiss
+                </button>
+              </div>
+            )}
 
             <div className="rounded-2xl bg-neutral-50 border border-neutral-200 p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-4">
               <div className="flex items-center gap-4">
@@ -1551,16 +1965,39 @@ export const ExamInterface: React.FC<ExamInterfaceProps> = ({
                     Please Read Before Clicking &quot;Start Exam Now&quot;
                   </h3>
                 </div>
-                {availablePublishedTests[0] && (
-                  <button
-                    type="button"
-                    onClick={() => handleSelectAndStartPublishedTest(availablePublishedTests[0])}
-                    className="px-6 py-3 rounded-xl bg-[#0a6b3c] hover:bg-[#0e8a4e] text-white text-xs md:text-sm font-extrabold flex items-center justify-center gap-2 transition-colors cursor-pointer shrink-0 shadow-sm"
-                  >
-                    <Play className="w-4 h-4 fill-current" />
-                    <span>Start Exam Now</span>
-                  </button>
-                )}
+                {availablePublishedTests[0] && (() => {
+                  const firstSched = getScheduleForTest(availablePublishedTests[0]);
+                  if (!firstSched.allowed) {
+                    return (
+                      <button
+                        type="button"
+                        disabled
+                        className={`px-5 py-3 rounded-xl text-xs font-extrabold flex items-center justify-center gap-2 cursor-not-allowed shrink-0 ${
+                          firstSched.status === 'ended'
+                            ? 'bg-red-600 text-white'
+                            : 'bg-amber-100 border border-amber-300 text-amber-900'
+                        }`}
+                      >
+                        <Lock className="w-4 h-4" />
+                        <span>
+                          {firstSched.status === 'ended'
+                            ? `Closed — Ended at ${firstSched.endTimeFormatted}`
+                            : `Starts in ${firstSched.countdownLabel} (${firstSched.startTimeFormatted})`}
+                        </span>
+                      </button>
+                    );
+                  }
+                  return (
+                    <button
+                      type="button"
+                      onClick={() => handleSelectAndStartPublishedTest(availablePublishedTests[0])}
+                      className="px-6 py-3 rounded-xl bg-[#0a6b3c] hover:bg-[#0e8a4e] text-white text-xs md:text-sm font-extrabold flex items-center justify-center gap-2 transition-colors cursor-pointer shrink-0 shadow-sm"
+                    >
+                      <Play className="w-4 h-4 fill-current" />
+                      <span>Start Exam Now</span>
+                    </button>
+                  );
+                })()}
               </div>
               <ul className="grid grid-cols-1 sm:grid-cols-2 gap-2 text-xs text-neutral-700 font-medium list-disc list-inside">
                 <li>
@@ -1755,6 +2192,33 @@ export const ExamInterface: React.FC<ExamInterfaceProps> = ({
                           ))}
                         </div>
                       )}
+
+                      {/* Per-Test Schedule Status Banner (Before Exam UI) */}
+                      {(() => {
+                        const testSched = getScheduleForTest(pubTest);
+                        if (testSched.status === 'no_schedule') return null;
+                        return (
+                          <div
+                            className={`mt-2 p-2.5 rounded-xl border text-xs font-extrabold flex flex-wrap items-center justify-between gap-2 ${
+                              testSched.status === 'live'
+                                ? 'bg-[#0a6b3c]/10 border-[#0a6b3c] text-[#0a6b3c]'
+                                : testSched.status === 'upcoming'
+                                ? 'bg-amber-50 border-amber-300 text-amber-900'
+                                : 'bg-red-50 border-red-300 text-red-700'
+                            }`}
+                          >
+                            <div className="flex items-center gap-1.5">
+                              <Clock className="w-3.5 h-3.5 shrink-0" />
+                              <span>{testSched.bannerText}</span>
+                            </div>
+                            {testSched.status !== 'live' && (
+                              <span className="text-[11px] font-bold">
+                                {testSched.message}
+                              </span>
+                            )}
+                          </div>
+                        );
+                      })()}
                     </div>
 
                     <div className="flex flex-wrap items-center gap-2 shrink-0">
@@ -1768,31 +2232,65 @@ export const ExamInterface: React.FC<ExamInterfaceProps> = ({
                         </button>
                       )}
 
-                      {isLimitReached ? (
-                        <button
-                          type="button"
-                          disabled
-                          className="px-5 py-3 rounded-xl bg-neutral-200 text-neutral-600 text-xs font-extrabold flex items-center justify-center gap-2 cursor-not-allowed"
-                        >
-                          <Lock className="w-3.5 h-3.5" />
-                          <span>
-                            Max Attempts Reached ({attemptsUsed}/{maxPermitted})
-                          </span>
-                        </button>
-                      ) : (
-                        <button
-                          type="button"
-                          onClick={() => handleSelectAndStartPublishedTest(pubTest)}
-                          className="px-6 py-3 rounded-xl bg-[#0a6b3c] hover:bg-[#0e8a4e] text-white text-xs md:text-sm font-extrabold flex items-center justify-center gap-2 transition-colors cursor-pointer shrink-0 shadow-xs"
-                        >
-                          <Play className="w-3.5 h-3.5 fill-current" />
-                          <span>
-                            {attemptsUsed > 0
-                              ? `Retake (${attemptsUsed + 1}/${maxPermitted})`
-                              : 'Start Exam Now'}
-                          </span>
-                        </button>
-                      )}
+                      {(() => {
+                        const testSched = getScheduleForTest(pubTest);
+                        if (testSched.status === 'ended') {
+                          return (
+                            <button
+                              type="button"
+                              disabled
+                              className="px-5 py-3 rounded-xl bg-red-600 text-white text-xs font-extrabold flex items-center justify-center gap-2 cursor-not-allowed opacity-90"
+                            >
+                              <Lock className="w-3.5 h-3.5" />
+                              <span>
+                                Closed — Ended at {testSched.endTimeFormatted}
+                              </span>
+                            </button>
+                          );
+                        }
+                        if (testSched.status === 'upcoming') {
+                          return (
+                            <button
+                              type="button"
+                              disabled
+                              className="px-5 py-3 rounded-xl bg-amber-100 border border-amber-300 text-amber-900 text-xs font-extrabold flex items-center justify-center gap-2 cursor-not-allowed"
+                            >
+                              <Clock className="w-3.5 h-3.5" />
+                              <span>
+                                Starts in {testSched.countdownLabel} ({testSched.startTimeFormatted})
+                              </span>
+                            </button>
+                          );
+                        }
+                        if (isLimitReached) {
+                          return (
+                            <button
+                              type="button"
+                              disabled
+                              className="px-5 py-3 rounded-xl bg-neutral-200 text-neutral-600 text-xs font-extrabold flex items-center justify-center gap-2 cursor-not-allowed"
+                            >
+                              <Lock className="w-3.5 h-3.5" />
+                              <span>
+                                Max Attempts Reached ({attemptsUsed}/{maxPermitted})
+                              </span>
+                            </button>
+                          );
+                        }
+                        return (
+                          <button
+                            type="button"
+                            onClick={() => handleSelectAndStartPublishedTest(pubTest)}
+                            className="px-6 py-3 rounded-xl bg-[#0a6b3c] hover:bg-[#0e8a4e] text-white text-xs md:text-sm font-extrabold flex items-center justify-center gap-2 transition-colors cursor-pointer shrink-0 shadow-xs"
+                          >
+                            <Play className="w-3.5 h-3.5 fill-current" />
+                            <span>
+                              {attemptsUsed > 0
+                                ? `Retake (${attemptsUsed + 1}/${maxPermitted})`
+                                : 'Start Exam Now'}
+                            </span>
+                          </button>
+                        );
+                      })()}
                     </div>
                   </div>
                 );
@@ -1952,6 +2450,11 @@ export const ExamInterface: React.FC<ExamInterfaceProps> = ({
               </div>
 
               {/* Bottom Cancel & Attempt Buttons */}
+              {!activeScheduleCheck.allowed && (
+                <div className="p-3.5 rounded-2xl border-2 border-red-400 bg-red-50 text-red-900 text-xs font-extrabold">
+                  {activeScheduleCheck.message}
+                </div>
+              )}
               <div className="grid grid-cols-2 gap-3 pt-1">
                 <button
                   type="button"
@@ -1962,7 +2465,16 @@ export const ExamInterface: React.FC<ExamInterfaceProps> = ({
                 </button>
                 <button
                   type="button"
+                  disabled={!activeScheduleCheck.allowed}
                   onClick={async () => {
+                    const verified = await activeScheduleCheck.verifyWithServerApi(
+                      selectedTest?.testCode
+                    );
+                    if (!verified.allowed) {
+                      setScheduleBlockMessage(verified.message);
+                      setStage('portal');
+                      return;
+                    }
                     if (isCameraAccessRequired && !liveCameraStream) {
                       setShowCameraPermissionPopup(true);
                       const granted = await requestLiveCameraAccess(true);
@@ -1976,7 +2488,7 @@ export const ExamInterface: React.FC<ExamInterfaceProps> = ({
                       setStage('fullscreen-prompt');
                     }
                   }}
-                  className="py-3 px-4 rounded-xl bg-[#0a6b3c] hover:bg-[#0e8a4e] text-white text-xs md:text-sm font-extrabold flex items-center justify-center gap-2 transition-colors cursor-pointer shadow-sm"
+                  className="py-3 px-4 rounded-xl bg-[#0a6b3c] hover:bg-[#0e8a4e] disabled:bg-neutral-300 disabled:text-neutral-600 text-white text-xs md:text-sm font-extrabold flex items-center justify-center gap-2 transition-colors cursor-pointer disabled:cursor-not-allowed shadow-sm"
                 >
                   <Play className="w-3.5 h-3.5 fill-current" />
                   <span>Attempt</span>
@@ -2062,6 +2574,16 @@ export const ExamInterface: React.FC<ExamInterfaceProps> = ({
             {activeSubject} - {currentSubjectQuestions.length} Questions
           </div>
 
+          {/* Live Exam Schedule Window Countdown Pill (if schedule configured) */}
+          {activeScheduleCheck.status === 'live' && (
+            <div className="hidden md:inline-flex items-center gap-1.5 px-3.5 py-1.5 rounded-full bg-emerald-950/60 border border-emerald-300/40 text-emerald-200 font-mono text-xs font-extrabold">
+              <Clock className="w-3.5 h-3.5 text-emerald-300 shrink-0" />
+              <span>
+                Schedule Ends {activeScheduleCheck.endTimeFormatted} ({activeScheduleCheck.countdownLabel})
+              </span>
+            </div>
+          )}
+
           {/* White Timer Pill with Dark Border */}
           <div
             className={`px-4 py-1.5 rounded-full border-2 border-neutral-900 font-mono text-xs md:text-sm font-extrabold flex items-center gap-2 tabular-nums shadow-xs ${
@@ -2104,6 +2626,17 @@ export const ExamInterface: React.FC<ExamInterfaceProps> = ({
           </button>
         </div>
       </header>
+
+      {/* Auto-Submit Banner when Exam Schedule Window Reaches end_time */}
+      {(scheduleAutoSubmitting || activeScheduleCheck.status === 'ended') && (
+        <div className="bg-red-600 text-white px-4 py-3 flex items-center justify-center gap-2.5 text-xs md:text-sm font-extrabold shadow-md animate-pulse">
+          <Clock className="w-4 h-4 shrink-0" />
+          <span>
+            Schedule time is up, submitting... ({activeScheduleCheck.centreName} schedule ended at{' '}
+            {activeScheduleCheck.endTimeFormatted})
+          </span>
+        </div>
+      )}
 
       {/* Lost Focus Warning Banner if fullscreen exited */}
       {lostFocusWarning && (
@@ -2252,14 +2785,25 @@ export const ExamInterface: React.FC<ExamInterfaceProps> = ({
             }`}
           >
             {/* Question Card Top Strip */}
-            <div className="bg-[#0a6b3c]/6 border-b border-[#0a6b3c]/15 px-5 py-3.5 flex items-center justify-between">
+            <div className="bg-[#0a6b3c]/6 border-b border-[#0a6b3c]/15 px-5 py-3.5 flex items-center justify-between gap-2">
               <span className="text-xs md:text-sm font-extrabold text-[#0a6b3c]">
                 {activeSubject} - Question {subjQuestionIndex + 1} of{' '}
                 {currentSubjectQuestions.length}
               </span>
+              <span
+                className={`px-2.5 py-0.5 rounded-full text-[10px] font-extrabold uppercase tracking-wider ${
+                  currentQuestion?.questionType === 'TYA'
+                    ? 'bg-[#0a6b3c] text-white'
+                    : 'bg-[#0a6b3c]/15 text-[#0a6b3c]'
+                }`}
+              >
+                {currentQuestion?.questionType === 'TYA'
+                  ? 'TYA • Type Your Answer'
+                  : 'MCQ • Multiple Choice'}
+              </span>
             </div>
 
-            {/* Question Stem & Radio Options */}
+            {/* Question Stem & Response Input (MCQ Radio Options OR TYA Text Input Box) */}
             <div className="p-5 md:p-6 space-y-5">
               <div className="text-sm md:text-base leading-relaxed">
                 <span className="font-extrabold text-[#0a6b3c] mr-1.5">
@@ -2270,44 +2814,81 @@ export const ExamInterface: React.FC<ExamInterfaceProps> = ({
                 </span>
               </div>
 
-              <div className="space-y-3">
-                {currentQuestion?.options.map((opt, idx) => {
-                  const letter = ['A', 'B', 'C', 'D'][idx];
-                  const isSelected = answers[currentQuestion.id] === idx;
-                  return (
-                    <button
-                      key={idx}
-                      type="button"
-                      onClick={() => handleSelectOption(idx)}
-                      className={`w-full p-4 rounded-xl border text-left flex items-center gap-3.5 transition-all cursor-pointer ${
-                        darkMode
-                          ? 'border-neutral-800 bg-neutral-900'
-                          : 'border-neutral-200 bg-white'
-                      }`}
-                    >
-                      {/* Radio Circle */}
-                      <span
-                        className={`w-5 h-5 rounded-full border-2 flex items-center justify-center shrink-0 transition-colors ${
-                          isSelected
-                            ? 'border-[#0a6b3c]'
-                            : darkMode
-                            ? 'border-neutral-600'
-                            : 'border-neutral-300'
+              {currentQuestion?.questionType === 'TYA' ? (
+                <div className="space-y-2.5 pt-1">
+                  <label className="block text-xs font-extrabold uppercase tracking-wider text-[#0a6b3c]">
+                    Type your answer here
+                  </label>
+                  <input
+                    type="text"
+                    autoComplete="off"
+                    spellCheck={true}
+                    value={typedAnswers[currentQuestion.id] || ''}
+                    onChange={(e) => handleTypedAnswerChange(e.target.value)}
+                    placeholder="Type your answer"
+                    className={`w-full px-4 py-3.5 rounded-xl border-2 text-sm font-bold focus:border-[#0a6b3c] focus:outline-none transition-colors ${
+                      darkMode
+                        ? 'bg-neutral-800 border-neutral-700 text-white placeholder:text-neutral-500'
+                        : 'bg-neutral-50/70 border-neutral-300 text-black placeholder:text-neutral-400 focus:bg-white'
+                    }`}
+                  />
+                  <div className="flex items-center justify-between text-[11px] text-neutral-500">
+                    <span>
+                      {(typedAnswers[currentQuestion.id] || '').trim().length > 0
+                        ? '✓ Response recorded'
+                        : 'Enter your short scientific or direct answer above'}
+                    </span>
+                    {(typedAnswers[currentQuestion.id] || '').trim().length > 0 && (
+                      <button
+                        type="button"
+                        onClick={() => handleTypedAnswerChange('')}
+                        className="text-red-600 hover:underline font-bold cursor-pointer"
+                      >
+                        Clear answer
+                      </button>
+                    )}
+                  </div>
+                </div>
+              ) : (
+                <div className="space-y-3">
+                  {currentQuestion?.options.map((opt, idx) => {
+                    const letter = ['A', 'B', 'C', 'D'][idx];
+                    const isSelected = answers[currentQuestion.id] === idx;
+                    return (
+                      <button
+                        key={idx}
+                        type="button"
+                        onClick={() => handleSelectOption(idx)}
+                        className={`w-full p-4 rounded-xl border text-left flex items-center gap-3.5 transition-all cursor-pointer ${
+                          darkMode
+                            ? 'border-neutral-800 bg-neutral-900'
+                            : 'border-neutral-200 bg-white'
                         }`}
                       >
-                        {isSelected && (
-                          <span className="w-2.5 h-2.5 rounded-full bg-[#0a6b3c]" />
-                        )}
-                      </span>
+                        {/* Radio Circle */}
+                        <span
+                          className={`w-5 h-5 rounded-full border-2 flex items-center justify-center shrink-0 transition-colors ${
+                            isSelected
+                              ? 'border-[#0a6b3c]'
+                              : darkMode
+                              ? 'border-neutral-600'
+                              : 'border-neutral-300'
+                          }`}
+                        >
+                          {isSelected && (
+                            <span className="w-2.5 h-2.5 rounded-full bg-[#0a6b3c]" />
+                          )}
+                        </span>
 
-                      <span className="text-sm font-extrabold shrink-0">
-                        {letter}.
-                      </span>
-                      <span className="text-sm font-medium">{opt}</span>
-                    </button>
-                  );
-                })}
-              </div>
+                        <span className="text-sm font-extrabold shrink-0">
+                          {letter}.
+                        </span>
+                        <span className="text-sm font-medium">{opt}</span>
+                      </button>
+                    );
+                  })}
+                </div>
+              )}
             </div>
 
             {/* Bottom Navigation Bar (< Previous | Next >) */}
@@ -2370,7 +2951,7 @@ export const ExamInterface: React.FC<ExamInterfaceProps> = ({
             <div className="flex flex-wrap gap-2 pt-1">
               {currentSubjectQuestions.map((q, idx) => {
                 const isCurrent = idx === subjQuestionIndex;
-                const isAnswered = answers[q.id] !== undefined;
+                const isAnswered = isQuestionAnswered(q);
                 return (
                   <button
                     key={q.id}
@@ -2575,17 +3156,23 @@ export const ExamInterface: React.FC<ExamInterfaceProps> = ({
             <div className="grid grid-cols-2 gap-3 pt-1">
               <button
                 type="button"
+                disabled={isSubmittingAndEvaluating}
                 onClick={() => setShowConfirmSubmit(false)}
-                className="py-3 px-4 rounded-xl border border-neutral-300 bg-white hover:bg-neutral-50 text-xs font-bold text-black transition-colors cursor-pointer"
+                className="py-3 px-4 rounded-xl border border-neutral-300 bg-white hover:bg-neutral-50 text-xs font-bold text-black transition-colors cursor-pointer disabled:opacity-50"
               >
                 Review Questions
               </button>
               <button
                 type="button"
+                disabled={isSubmittingAndEvaluating}
                 onClick={handleFinalizeSubmission}
-                className="py-3 px-4 rounded-xl bg-[#0a6b3c] hover:bg-[#0e8a4e] text-white text-xs font-extrabold flex items-center justify-center gap-1.5 transition-colors cursor-pointer shadow-sm"
+                className="py-3 px-4 rounded-xl bg-[#0a6b3c] hover:bg-[#0e8a4e] text-white text-xs font-extrabold flex items-center justify-center gap-1.5 transition-colors cursor-pointer shadow-sm disabled:opacity-60"
               >
-                <span>Yes, Submit Exam</span>
+                <span>
+                  {isSubmittingAndEvaluating
+                    ? 'Evaluating Answers...'
+                    : 'Yes, Submit Exam'}
+                </span>
                 <Check className="w-4 h-4 stroke-[2.5]" />
               </button>
             </div>

@@ -71,23 +71,40 @@ export interface Candidate {
   createdAt: string;
 }
 
+export type QuestionType = 'MCQ' | 'TYA';
+
 export interface Question {
   id: string;
   subject: string;
   bankId?: string;
   category: CategoryType | 'All';
   questionText: string;
-  options: [string, string, string, string];
+  options: [string, string, string, string] | string[];
   correctAnswer: number; // 0, 1, 2, or 3
+  questionType?: QuestionType; // 'MCQ' (default) | 'TYA' (Type Your Answers)
+  answerKeys?: string[]; // For TYA: 1 or more acceptable answers (e.g. ['Grana', 'Thylakoid membrane', 'Thylakoid membranes'])
+  mark?: number; // Default 1
+  allowAiEval?: boolean; // Default true for TYA
+  explanation?: string;
 }
 
 export interface AttemptedQuestionItem {
+  id?: string;
   subject: string;
   questionNumber: number;
   questionText: string;
-  options: [string, string, string, string];
+  options: [string, string, string, string] | string[];
   selectedAnswer: number | null;
   correctAnswer: number;
+  questionType?: QuestionType; // 'MCQ' | 'TYA'
+  typedAnswer?: string; // Candidate's free-text typed response for TYA
+  answerKeys?: string[]; // Official acceptable answer keys for TYA
+  isCorrect?: boolean; // Whether exact match or AI evaluation marked it correct
+  aiEvaluated?: boolean; // True if evaluated by AI examiner
+  aiExplanation?: string; // Explanation from AI examiner or exact match
+  aiConfidence?: number; // 0 - 1 confidence from AI
+  marksAwarded?: number; // Marks awarded (e.g. 1 or 0)
+  maxMarks?: number; // Max marks for the question (e.g. 1)
 }
 
 export interface SubjectScoreDetail {
@@ -110,6 +127,7 @@ export interface ExamResult {
   stateOfOrigin?: string;
   examCenterName?: string;
   testId?: string;
+  testCode?: string;
   testTitle?: string;
   score: number; // Aggregate = sum of all subjects (e.g., 99 + 99 + 99 + 99 = 396)
   maxAggregate?: number; // e.g., 396 (4 subjects * 99)
@@ -202,12 +220,27 @@ export type QuestionDownloadMode =
   | 'Download all exam questions & answers'
   | 'Download failed questions only';
 
+export type ExamScheduleType = 'general' | 'per_centre';
+
+export interface ExamScheduleItem {
+  id: string; // uuid PK
+  exam_code: string; // FK exams.exam_code e.g., QMT3045B
+  exam_center_id: string | null; // FK exam_centers - NULL means GENERAL schedule
+  exam_center_name?: string | null; // e.g., "Q Zone 1", "Lagos Main", or null for GENERAL
+  schedule_type: ExamScheduleType; // 'general' | 'per_centre'
+  start_time: string; // TIMESTAMPTZ ISO string (Africa/Lagos +01:00)
+  end_time: string; // TIMESTAMPTZ ISO string (Africa/Lagos +01:00)
+  is_active: boolean; // default true
+  created_at: string; // TIMESTAMPTZ
+}
+
 export interface ExamSettings {
   examOpen: boolean;
   registrationOpen?: boolean;
   freeRegistration?: boolean;
   allowRegNumberGeneration?: boolean;
   requirePhotoCardDuringRegistration?: boolean;
+  enableAiEvaluationForTya?: boolean; // Toggle "Enable AI Evaluation for TYA" - ON by default
   examStartFlow?: ExamStartFlowType; // "dashboard_first" | "immediate" (system_settings.exam_start_flow)
   defaultCandidatePassword?: string; // Plain or masked preview for admin convenience
   defaultCandidatePasswordHash?: string; // Hashed master password stored in system_settings.default_candidate_password
@@ -232,6 +265,7 @@ export interface ExamSettings {
   brandColors?: BrandColorsConfig;
   subjectCombinations?: SubjectCombinationConfig[];
   examCenters?: ExamCenter[];
+  examSchedules?: ExamScheduleItem[];
   availableSubjects?: string[];
   subjectPooling: SubjectPoolConfig[];
   publishedTests: PublishedTest[];
