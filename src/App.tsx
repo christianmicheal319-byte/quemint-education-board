@@ -29,6 +29,9 @@ import {
   PsychometricConfig,
 } from './utils/calculateScore';
 import {
+  DEFAULT_EXAM_CENTERS,
+  DEFAULT_SUBJECTS_LIST,
+  DEFAULT_SUBJECT_COMBINATIONS,
   INITIAL_CANDIDATES,
   INITIAL_NOTIFICATIONS,
   INITIAL_QUESTIONS,
@@ -40,15 +43,31 @@ import { RegistrationFlow } from './components/RegistrationFlow';
 import { ExamInterface } from './components/ExamInterface';
 import { AdminDashboard } from './components/AdminDashboard';
 import { RegistrationSlipModal } from './components/RegistrationSlipModal';
+import { VerifyIdentityModal } from './components/VerifyIdentityModal';
 import {
   downloadCandidateQuestionsPdf,
   downloadCandidateResultSlipPdf,
-  formatExamDateTime,
   getQuemintGradeInfo,
+  isExamRankingPublished,
+  resolveResultSlipFieldRows,
 } from './utils/pdfSlipGenerator';
 import { getCandidateHdPortraitUrl } from './utils/liveProctoringBus';
 
 type AppView = 'login' | 'registration' | 'exam' | 'result' | 'admin';
+
+function normalizeCategoryName(cat?: string): string {
+  const c = (cat || '').trim().toLowerCase();
+  if (c === 'medical' || c === 'engineering' || c === 'science' || c === 'sciences') {
+    return 'Science';
+  }
+  if (c === 'arts' || c === 'art') {
+    return 'Art';
+  }
+  if (c === 'commercial') {
+    return 'Commercial';
+  }
+  return cat?.trim() || 'Science';
+}
 
 export default function App() {
   const [view, setView] = useState<AppView>('login');
@@ -61,6 +80,7 @@ export default function App() {
       const parsed: Candidate[] = saved ? JSON.parse(saved) : INITIAL_CANDIDATES;
       return parsed.map((c) => ({
         ...c,
+        category: normalizeCategoryName(c.category),
         passportDataUrl: getCandidateHdPortraitUrl(c),
       }));
     } catch {
@@ -105,11 +125,31 @@ export default function App() {
             }))
           : INITIAL_SETTINGS.publishedTests;
 
+        // Migrate old 4 categories (Medical, Engineering, Arts, Commercial) to the 3 standard categories (Science, Art, Commercial)
+        const hasOldDefaultCombos =
+          Array.isArray(parsed.subjectCombinations) &&
+          parsed.subjectCombinations.some((sc: any) =>
+            ['medical', 'engineering', 'arts'].includes((sc?.name || '').trim().toLowerCase())
+          );
+
         return {
           ...INITIAL_SETTINGS,
           ...parsed,
           durationMinutes: effectiveDuration,
           publishedTests: syncedPublishedTests,
+          subjectCombinations: hasOldDefaultCombos
+            ? DEFAULT_SUBJECT_COMBINATIONS
+            : Array.isArray(parsed.subjectCombinations) && parsed.subjectCombinations.length > 0
+            ? parsed.subjectCombinations
+            : DEFAULT_SUBJECT_COMBINATIONS,
+          examCenters:
+            Array.isArray(parsed.examCenters) && parsed.examCenters.length > 0
+              ? parsed.examCenters
+              : DEFAULT_EXAM_CENTERS,
+          availableSubjects:
+            Array.isArray(parsed.availableSubjects) && parsed.availableSubjects.length > 0
+              ? parsed.availableSubjects
+              : DEFAULT_SUBJECTS_LIST,
           loginBanner: {
             ...INITIAL_SETTINGS.loginBanner,
             ...(parsed.loginBanner || {}),
@@ -399,6 +439,8 @@ export default function App() {
   // Login states
   const [regInput, setRegInput] = useState('');
   const [loginError, setLoginError] = useState('');
+  const [pendingVerifyCandidate, setPendingVerifyCandidate] = useState<Candidate | null>(null);
+  const [examInitialStage, setExamInitialStage] = useState<'portal' | 'live-exam'>('portal');
   const [loggedInCandidate, setLoggedInCandidate] = useState<Candidate | null>(null);
   const [activeExamResult, setActiveExamResult] = useState<ExamResult | null>(null);
   const [showResultSlipOverlay, setShowResultSlipOverlay] = useState<boolean>(true);
@@ -407,6 +449,10 @@ export default function App() {
   const [showCheckResultModal, setShowCheckResultModal] = useState(false);
   const [resultLookupReg, setResultLookupReg] = useState('');
   const [lookupResultError, setLookupResultError] = useState('');
+  const [pendingVerifyResultCheck, setPendingVerifyResultCheck] = useState<{
+    candidate: Candidate;
+    result: ExamResult;
+  } | null>(null);
   const [slipModalCandidate, setSlipModalCandidate] = useState<Candidate | null>(null);
 
   // Protected Admin Authentication states (password is never displayed anywhere)
@@ -508,6 +554,9 @@ export default function App() {
               ...r,
               category: cand.category,
               gender: cand.gender,
+              courseOfStudy: cand.courseOfStudy || r.courseOfStudy,
+              stateOfOrigin: cand.stateOfOrigin || r.stateOfOrigin,
+              examCenterName: cand.examCenterName || r.examCenterName,
               regNumber: cand.regNumber || r.regNumber,
               candidateName: `${cand.firstName} ${
                 cand.middleName ? cand.middleName + ' ' : ''
@@ -535,11 +584,18 @@ export default function App() {
       return;
     }
 
-    const found = candidates.find(
-      (c) =>
+    const found = candidates.find((c) => {
+      const fullNameUpper = `${c.firstName} ${c.middleName ? c.middleName + ' ' : ''}${c.surname}`
+        .trim()
+        .toUpperCase();
+      const shortNameUpper = `${c.firstName} ${c.surname}`.trim().toUpperCase();
+      return (
         c.regNumber.toUpperCase() === cleanReg ||
-        (c.pin && c.pin.toUpperCase() === cleanReg)
-    );
+        (c.pin && c.pin.toUpperCase() === cleanReg) ||
+        fullNameUpper === cleanReg ||
+        shortNameUpper === cleanReg
+      );
+    });
 
     if (!found) {
       setLoginError(
@@ -568,8 +624,8 @@ export default function App() {
       return;
     }
 
-    setLoggedInCandidate(found);
-    setView('exam');
+    // Open TASK 2 Password Pop-up ("Verify Identity") before starting exam
+    setPendingVerifyCandidate(found);
   };
 
   const handleCheckResultSubmit = (e: React.FormEvent) => {
@@ -586,17 +642,67 @@ export default function App() {
       setLookupResultError('Please type in your registration number.');
       return;
     }
-    const res = results.find((r) => r.regNumber.toUpperCase() === clean);
+
+    // Match candidate by Reg No, PIN, or Name
+    const matchedCand = candidates.find((c) => {
+      const fullNameUpper = `${c.firstName} ${c.middleName ? c.middleName + ' ' : ''}${c.surname}`
+        .trim()
+        .toUpperCase();
+      const shortNameUpper = `${c.firstName} ${c.surname}`.trim().toUpperCase();
+      return (
+        c.regNumber.toUpperCase() === clean ||
+        (c.pin && c.pin.toUpperCase() === clean) ||
+        fullNameUpper === clean ||
+        shortNameUpper === clean
+      );
+    });
+
+    const res = results.find(
+      (r) =>
+        r.regNumber.toUpperCase() === clean ||
+        r.candidateName.trim().toUpperCase() === clean ||
+        (matchedCand &&
+          (r.candidateId === matchedCand.id ||
+            r.regNumber.toUpperCase() === matchedCand.regNumber.toUpperCase()))
+    );
+
     if (!res) {
       setLookupResultError(
         'No result found. Please type in your registration number.'
       );
       return;
     }
-    setActiveExamResult(res);
-    setShowResultSlipOverlay(true);
+
+    const nameParts = (res.candidateName || 'Candidate').trim().split(/\s+/);
+    const verifyCand: Candidate = matchedCand || {
+      id: res.candidateId || `cand-${res.id}`,
+      firstName: nameParts[0] || 'Candidate',
+      middleName: nameParts.length > 2 ? nameParts.slice(1, -1).join(' ') : '',
+      surname: nameParts.length > 1 ? nameParts[nameParts.length - 1] : '',
+      gender: res.gender || 'Female',
+      category: res.category || 'Science',
+      courseOfStudy: res.courseOfStudy || 'General Studies',
+      stateOfOrigin: res.stateOfOrigin || '',
+      examCenterName: res.examCenterName || 'Main Hall',
+      regNumber: res.regNumber,
+      pin: '',
+      paymentStatus: 'Paid',
+      paymentMethod: 'Free Registration',
+      amountPaid: 0,
+      transactionRef: '',
+      suspended: false,
+      examAssigned: true,
+      examDate: settings.defaultExamDate,
+      examTime: settings.defaultExamTime,
+      createdAt: res.submittedAt,
+    };
+
+    // Close the Reg No lookup modal and open the exact same Verify Identity password pop-up used during exam login
     setShowCheckResultModal(false);
-    setView('result');
+    setPendingVerifyResultCheck({
+      candidate: verifyCand,
+      result: res,
+    });
   };
 
   const handleDownloadResultSlip = (res: ExamResult, _genderStr: string) => {
@@ -764,16 +870,18 @@ export default function App() {
     );
   }
 
-  // Render CBT Exam View
+  // Render CBT Exam View (Portal Dashboard or Immediate Live Exam)
   if (view === 'exam' && loggedInCandidate) {
     const activeLoggedInCand =
       candidates.find((c) => c.id === loggedInCandidate.id) || loggedInCandidate;
     return (
       <ExamInterface
+        key={`${activeLoggedInCand.id}-${examInitialStage}`}
         candidate={activeLoggedInCand}
         questions={questions}
         settings={settings}
         results={results}
+        initialStage={examInitialStage}
         onUpdateCandidate={(updatedCand) => {
           setLoggedInCandidate(updatedCand);
           handleRegisterOrUpdateCandidate(updatedCand);
@@ -787,6 +895,11 @@ export default function App() {
           );
           setActiveExamResult(newResult);
           setShowResultSlipOverlay(true);
+          try {
+            window.history.pushState({}, '', '/');
+          } catch {
+            // ignore
+          }
           setView('result');
         }}
         onViewResult={(existingResult) => {
@@ -796,6 +909,11 @@ export default function App() {
         }}
         onExitExam={() => {
           setRegInput('');
+          try {
+            window.history.pushState({}, '', '/');
+          } catch {
+            // ignore
+          }
           setView('login');
         }}
       />
@@ -969,9 +1087,18 @@ export default function App() {
 
     const gradeInfo = getQuemintGradeInfo(activeExamResult.percentage);
 
-    const sortedResults = [...results].sort((a, b) => b.percentage - a.percentage);
+    const sortedResults = [...results].sort(
+      (a, b) => b.score - a.score || b.percentage - a.percentage
+    );
     const rankIndex = sortedResults.findIndex((r) => r.id === activeExamResult.id);
     const rankPosition = rankIndex !== -1 ? rankIndex + 1 : 1;
+    const rankingPublished = isExamRankingPublished(activeExamResult, settings);
+    const dynamicSlipRows = resolveResultSlipFieldRows(
+      activeExamResult,
+      matchedCandidate,
+      settings,
+      { rank: rankPosition, total: Math.max(1, results.length) }
+    );
 
     return (
       <div className="min-h-screen bg-neutral-100 text-black relative flex flex-col">
@@ -1050,6 +1177,31 @@ export default function App() {
               </button>
             </div>
 
+            {/* Dynamic Candidate Result Details on Check Results Portal (Controlled by Admin; Ranking hidden unless Published) */}
+            <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-3 text-xs">
+              {dynamicSlipRows.map((row) => (
+                <div
+                  key={row.key}
+                  className="p-3.5 rounded-2xl bg-neutral-50 border border-neutral-200"
+                >
+                  <span className="block text-[10px] font-extrabold uppercase tracking-wider text-neutral-500">
+                    {row.label}
+                  </span>
+                  <span
+                    className={`font-extrabold text-sm mt-0.5 block ${
+                      row.key === 'examinationCentre' || row.key === 'currentRanking'
+                        ? 'text-[#0a6b3c]'
+                        : row.key === 'regNumber'
+                        ? 'font-mono text-[#0a6b3c]'
+                        : 'text-black'
+                    }`}
+                  >
+                    {row.value}
+                  </span>
+                </div>
+              ))}
+            </div>
+
             {/* Grade, Average, Remark */}
             <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
               <div className="rounded-2xl bg-neutral-50 border border-neutral-200 p-4">
@@ -1084,51 +1236,95 @@ export default function App() {
               </div>
             </div>
 
-            {/* Overall Candidate Ranking */}
-            <div className="rounded-2xl border-2 border-[#0a6b3c]/30 bg-[#0a6b3c]/5 p-4 flex items-center justify-between">
-              <div className="space-y-0.5">
-                <div className="text-[10px] font-extrabold uppercase tracking-wider text-[#0a6b3c] flex items-center gap-1.5">
-                  <Trophy className="w-3.5 h-3.5" />
-                  <span>OVERALL CANDIDATE RANKING</span>
+            {/* Only display Candidate Ranking when Admin has clicked "Publish Ranking" on this exam */}
+            {rankingPublished && (
+              <div className="rounded-2xl border-2 border-[#0a6b3c]/30 bg-[#0a6b3c]/5 p-4 flex items-center justify-between">
+                <div className="space-y-0.5">
+                  <div className="text-[10px] font-extrabold uppercase tracking-wider text-[#0a6b3c] flex items-center gap-1.5">
+                    <Trophy className="w-3.5 h-3.5" />
+                    <span>OVERALL CANDIDATE RANKING</span>
+                  </div>
+                  <div className="text-xl font-extrabold text-black font-mono">
+                    #{rankPosition}{' '}
+                    <span className="text-xs font-sans font-semibold text-neutral-600">
+                      of {Math.max(1, results.length)} total candidates
+                    </span>
+                  </div>
                 </div>
-                <div className="text-xl font-extrabold text-black font-mono">
-                  #{rankPosition}{' '}
-                  <span className="text-xs font-sans font-semibold text-neutral-600">
-                    of {Math.max(1, results.length)} total candidates
-                  </span>
+                <div className="w-10 h-10 rounded-xl bg-[#0a6b3c] text-white flex items-center justify-center">
+                  <Trophy className="w-5 h-5" />
                 </div>
               </div>
-              <div className="w-10 h-10 rounded-xl bg-[#0a6b3c] text-white flex items-center justify-center">
-                <Trophy className="w-5 h-5" />
-              </div>
-            </div>
+            )}
           </div>
 
-          {/* Recent Attempts Card */}
+          {/* Subject Breakdown & Recent Attempts Card on Check Results Portal */}
           <div className="rounded-3xl bg-white border border-neutral-200 p-6 shadow-xs space-y-4">
-            <h2 className="text-base font-extrabold text-black">Recent Attempts</h2>
-            <div className="rounded-2xl border border-neutral-200 p-4 flex items-center justify-between gap-4">
-              <div>
-                <div className="font-extrabold text-sm text-black">
-                  {activeExamResult.testTitle ||
-                    settings.resultTitles?.testSubtitle ||
-                    'Rapid Test'}
-                </div>
-                <div className="text-xs text-neutral-500 mt-0.5">
-                  Aggregate Score: {activeExamResult.score} (
-                  {activeExamResult.percentage}%) ·{' '}
-                  <strong className="text-[#0a6b3c]">
-                    {gradeInfo.displayFull}
-                  </strong>
-                </div>
-              </div>
+            <div className="flex items-center justify-between">
+              <h2 className="text-base font-extrabold text-black">
+                Subject Breakdown &amp; Result Slip
+              </h2>
               <button
                 type="button"
-                onClick={() => setShowResultSlipOverlay(true)}
-                className="px-4 py-2 rounded-xl bg-[#0a6b3c]/10 text-[#0a6b3c] text-xs font-extrabold cursor-pointer shrink-0"
+                onClick={() =>
+                  handleDownloadResultSlip(activeExamResult, candidateGender)
+                }
+                className="px-3.5 py-2 rounded-xl bg-[#0a6b3c] hover:bg-[#0e8a4e] text-white text-xs font-extrabold flex items-center gap-1.5 cursor-pointer"
               >
-                Open Slip
+                <Download className="w-3.5 h-3.5" />
+                <span>Download PDF Slip</span>
               </button>
+            </div>
+
+            <div className="rounded-xl overflow-hidden border border-neutral-200">
+              <div className="bg-[#e3f5ec] border-b border-[#bfe5d0] px-4 py-3 flex items-center justify-between text-xs font-bold text-neutral-900">
+                <span>Subject</span>
+                <span>Score</span>
+              </div>
+              <div className="divide-y divide-neutral-100 text-xs bg-white">
+                {Object.entries(activeExamResult.subjectBreakdown).map(
+                  ([subj, stats]) => (
+                    <div
+                      key={subj}
+                      className="px-4 py-3 flex items-center justify-between"
+                    >
+                      <span className="text-neutral-800 font-semibold">{subj}</span>
+                      <span className="font-bold text-neutral-900 tabular-nums">
+                        {stats.score}
+                      </span>
+                    </div>
+                  )
+                )}
+              </div>
+            </div>
+
+            <div className="pt-2 space-y-2">
+              <h3 className="text-xs font-extrabold uppercase tracking-wider text-neutral-500">
+                Recent Attempts
+              </h3>
+              <div className="rounded-2xl border border-neutral-200 p-4 flex items-center justify-between gap-4">
+                <div>
+                  <div className="font-extrabold text-sm text-black">
+                    {activeExamResult.testTitle ||
+                      settings.resultTitles?.testSubtitle ||
+                      'Rapid Test'}
+                  </div>
+                  <div className="text-xs text-neutral-500 mt-0.5">
+                    Aggregate Score: {activeExamResult.score} (
+                    {activeExamResult.percentage}%) ·{' '}
+                    <strong className="text-[#0a6b3c]">
+                      {gradeInfo.displayFull}
+                    </strong>
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setShowResultSlipOverlay(true)}
+                  className="px-4 py-2 rounded-xl bg-[#0a6b3c]/10 text-[#0a6b3c] text-xs font-extrabold cursor-pointer shrink-0"
+                >
+                  Open Slip
+                </button>
+              </div>
             </div>
           </div>
         </div>
@@ -1173,38 +1369,26 @@ export default function App() {
                   </p>
                 </div>
 
-                {/* Stacked Candidate Details */}
-                <div className="space-y-2.5 text-xs pt-1">
-                  <div>
-                    <div className="text-neutral-500">Candidate Name:</div>
-                    <div className="font-bold text-neutral-900 mt-0.5">
-                      {activeExamResult.candidateName}
+                {/* Dynamic Candidate Details (Admin can add/remove registration fields; Ranking only appears when Admin clicks Publish Ranking) */}
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-x-4 gap-y-2.5 text-xs pt-1">
+                  {dynamicSlipRows.map((row) => (
+                    <div key={row.key}>
+                      <div className="text-neutral-500">
+                        {row.label.endsWith(':') ? row.label : `${row.label}:`}
+                      </div>
+                      <div
+                        className={`font-bold mt-0.5 ${
+                          row.key === 'examinationCentre' || row.key === 'currentRanking'
+                            ? 'text-[#0a6b3c]'
+                            : row.key === 'category'
+                            ? 'text-neutral-900 lowercase'
+                            : 'text-neutral-900'
+                        }`}
+                      >
+                        {row.value}
+                      </div>
                     </div>
-                  </div>
-                  <div>
-                    <div className="text-neutral-500">Category:</div>
-                    <div className="font-bold text-neutral-900 mt-0.5 lowercase">
-                      {activeExamResult.category}
-                    </div>
-                  </div>
-                  <div>
-                    <div className="text-neutral-500">Registration Number:</div>
-                    <div className="font-bold text-neutral-900 mt-0.5">
-                      {activeExamResult.regNumber}
-                    </div>
-                  </div>
-                  <div>
-                    <div className="text-neutral-500">Exam Date/Time:</div>
-                    <div className="font-bold text-neutral-900 mt-0.5">
-                      {formatExamDateTime(activeExamResult.submittedAt)}
-                    </div>
-                  </div>
-                  <div>
-                    <div className="text-neutral-500">Gender:</div>
-                    <div className="font-bold text-neutral-900 mt-0.5">
-                      {candidateGender}
-                    </div>
-                  </div>
+                  ))}
                 </div>
 
                 <div className="border-t border-neutral-100" />
@@ -1552,6 +1736,54 @@ export default function App() {
           </div>
         </div>
       </main>
+
+      {/* TASK 2: Password Pop-Up Before Exam ("Verify Identity") */}
+      {pendingVerifyCandidate && (
+        <VerifyIdentityModal
+          candidate={pendingVerifyCandidate}
+          settings={settings}
+          onCancel={() => setPendingVerifyCandidate(null)}
+          onVerified={(flow) => {
+            const targetCand = pendingVerifyCandidate;
+            setPendingVerifyCandidate(null);
+            setLoggedInCandidate(targetCand);
+            if (flow === 'immediate') {
+              setExamInitialStage('live-exam');
+              try {
+                window.history.pushState({}, '', `/exam/${targetCand.id}`);
+              } catch {
+                // ignore
+              }
+            } else {
+              setExamInitialStage('portal');
+              try {
+                window.history.pushState({}, '', `/candidate/${targetCand.id}/portal`);
+              } catch {
+                // ignore
+              }
+            }
+            setView('exam');
+          }}
+        />
+      )}
+
+      {/* Password Pop-Up Before Checking Result (Same "Verify Identity" modal as Examination Login) */}
+      {pendingVerifyResultCheck && (
+        <VerifyIdentityModal
+          candidate={pendingVerifyResultCheck.candidate}
+          settings={settings}
+          onCancel={() => setPendingVerifyResultCheck(null)}
+          onVerified={() => {
+            const targetResult = pendingVerifyResultCheck.result;
+            setPendingVerifyResultCheck(null);
+            setResultLookupReg('');
+            setLookupResultError('');
+            setActiveExamResult(targetResult);
+            setShowResultSlipOverlay(true);
+            setView('result');
+          }}
+        />
+      )}
 
       {/* Check My Result Modal */}
       {showCheckResultModal && (

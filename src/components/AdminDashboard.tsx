@@ -40,36 +40,52 @@ import {
   UserPlus,
   GraduationCap,
   Hash,
+  MapPin,
+  Database,
   X,
+  EyeOff,
 } from 'lucide-react';
 import { jsPDF } from 'jspdf';
 import autoTable from 'jspdf-autotable';
 import {
   Candidate,
   CategoryType,
+  ExamCenter,
   ExamResult,
   ExamSettings,
+  ExamStartFlowType,
   GenderType,
   NotificationItem,
   PublishedTest,
   Question,
   QuestionDownloadMode,
+  ResultSlipFieldConfig,
   SubjectCombinationConfig,
   SubjectPoolConfig,
   SubjectScoreDetail,
+  SystemSettingItem,
 } from '../types';
-import { DEFAULT_SUBJECT_COMBINATIONS } from '../data/initialData';
+import {
+  DEFAULT_EXAM_CENTERS,
+  DEFAULT_RESULT_SLIP_FIELDS,
+  DEFAULT_SUBJECTS_LIST,
+  DEFAULT_SUBJECT_COMBINATIONS,
+} from '../data/initialData';
 import {
   calculateSetScore,
   calculateSetScoreDetailed,
   DEFAULT_PSYCHOMETRIC_CONFIG,
   PsychometricConfig,
 } from '../utils/calculateScore';
+import { hashPasswordSha256, simpleFallbackHash } from '../utils/passwordHash';
 import { QuemintSeal, QUEMINT_LOGO_URL } from './QuemintSeal';
 import { RegistrationSlipModal } from './RegistrationSlipModal';
 import { LiveProctoringPanel } from './LiveProctoringPanel';
 import {
   getQuemintGradeInfo,
+  getEffectiveResultSlipFields,
+  isExamRankingPublished,
+  resolveResultSlipFieldRows,
   downloadCandidateResultSlipPdf,
   downloadCandidateQuestionsPdf,
   drawOfficialSeal,
@@ -109,6 +125,7 @@ interface AdminDashboardProps {
 type AdminTab =
   | 'Overview'
   | 'Candidates'
+  | 'Exam Centers'
   | 'Question bank'
   | 'Results'
   | 'Analytics'
@@ -187,9 +204,225 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
     Record<string, string>
   >({});
 
+  // Admin-Controlled Exam Start Flow & Default Candidate Master Password state
+  const [examStartFlowDraft, setExamStartFlowDraft] = useState<ExamStartFlowType>(
+    settings.examStartFlow || 'dashboard_first'
+  );
+  const [defaultCandidatePasswordDraft, setDefaultCandidatePasswordDraft] =
+    useState<string>(settings.defaultCandidatePassword || 'quemint2026');
+  const [showDefaultCandidatePassword, setShowDefaultCandidatePassword] =
+    useState<boolean>(false);
+
+  // Dynamic Result Slip Custom Field Inputs
+  const [customSlipFieldLabel, setCustomSlipFieldLabel] = useState('');
+  const [customSlipFieldValue, setCustomSlipFieldValue] = useState('');
+
+  const effectiveResultSlipFields: ResultSlipFieldConfig[] = useMemo(
+    () => getEffectiveResultSlipFields(settings),
+    [settings]
+  );
+
+  const handleToggleResultSlipField = (fieldKey: string) => {
+    const updatedFields = effectiveResultSlipFields.map((f) =>
+      f.key === fieldKey ? { ...f, enabled: !f.enabled } : f
+    );
+    onUpdateSettings({
+      ...settings,
+      resultSlipFields: updatedFields,
+    });
+    const target = updatedFields.find((f) => f.key === fieldKey);
+    if (target) {
+      triggerToast(
+        target.enabled
+          ? `"${target.label}" added to Candidate Result Slip!`
+          : `"${target.label}" removed from Candidate Result Slip.`
+      );
+    }
+  };
+
+  const handleUpdateResultSlipFieldLabel = (fieldKey: string, newLabel: string) => {
+    const updatedFields = effectiveResultSlipFields.map((f) =>
+      f.key === fieldKey ? { ...f, label: newLabel } : f
+    );
+    onUpdateSettings({
+      ...settings,
+      resultSlipFields: updatedFields,
+    });
+  };
+
+  const handleAddCustomResultSlipField = () => {
+    const labelClean = customSlipFieldLabel.trim();
+    if (!labelClean) {
+      triggerToast('Please enter a label for the custom result slip field.');
+      return;
+    }
+    const newField: ResultSlipFieldConfig = {
+      key: `custom_${Date.now()}`,
+      label: labelClean,
+      enabled: true,
+      isCustom: true,
+      customValue: customSlipFieldValue.trim() || 'Verified',
+    };
+    const updatedFields = [...effectiveResultSlipFields, newField];
+    onUpdateSettings({
+      ...settings,
+      resultSlipFields: updatedFields,
+    });
+    setCustomSlipFieldLabel('');
+    setCustomSlipFieldValue('');
+    triggerToast(`Added "${labelClean}" to Candidate Result Slip!`);
+  };
+
+  const handleDeleteCustomResultSlipField = (fieldKey: string) => {
+    const updatedFields = effectiveResultSlipFields.filter((f) => f.key !== fieldKey);
+    onUpdateSettings({
+      ...settings,
+      resultSlipFields: updatedFields,
+    });
+    triggerToast('Custom result slip field removed.');
+  };
+
+  const handleTogglePublishRankingForTest = (testId: string) => {
+    const existingTests = settings.publishedTests || [];
+    const targetTest = existingTests.find((t) => t.id === testId);
+    const currentStatus = targetTest
+      ? Boolean(
+          targetTest.rankingPublished ||
+            (settings.rankingPublishedByTestId &&
+              settings.rankingPublishedByTestId[testId])
+        )
+      : Boolean(settings.globalRankingPublished);
+    const nextStatus = !currentStatus;
+
+    const updatedTests = existingTests.map((t) =>
+      t.id === testId ? { ...t, rankingPublished: nextStatus } : t
+    );
+    const updatedMap = {
+      ...(settings.rankingPublishedByTestId || {}),
+      [testId]: nextStatus,
+    };
+
+    onUpdateSettings({
+      ...settings,
+      publishedTests: updatedTests,
+      rankingPublishedByTestId: updatedMap,
+    });
+
+    triggerToast(
+      nextStatus
+        ? `Ranking PUBLISHED for "${targetTest?.title || 'Exam'}"! Candidates can now see their Current Ranking on their result slip.`
+        : `Ranking UNPUBLISHED for "${targetTest?.title || 'Exam'}". Ranking has been completely hidden from candidate results.`
+    );
+  };
+
+  useEffect(() => {
+    if (settings.examStartFlow) {
+      setExamStartFlowDraft(settings.examStartFlow);
+    }
+  }, [settings.examStartFlow]);
+
+  useEffect(() => {
+    if (settings.defaultCandidatePassword) {
+      setDefaultCandidatePasswordDraft(settings.defaultCandidatePassword);
+    }
+  }, [settings.defaultCandidatePassword]);
+
   const triggerToast = (msg: string) => {
     setSettingsSavedToast(msg);
     setTimeout(() => setSettingsSavedToast(''), 3500);
+  };
+
+  const normalizeSystemSettingsMap = (
+    raw: ExamSettings['systemSettings'] | SystemSettingItem[] | undefined
+  ): Record<string, string> => {
+    if (!raw) return {};
+    if (Array.isArray(raw)) {
+      const map: Record<string, string> = {};
+      raw.forEach((item) => {
+        if (item && typeof item.key === 'string') {
+          map[item.key] = String(item.value ?? '');
+        }
+      });
+      return map;
+    }
+    if (typeof raw === 'object') {
+      return { ...(raw as Record<string, string>) };
+    }
+    return {};
+  };
+
+  const handleSaveExamStartFlow = async () => {
+    const selectedFlow: ExamStartFlowType =
+      examStartFlowDraft === 'immediate' ? 'immediate' : 'dashboard_first';
+    const existingSysMap = normalizeSystemSettingsMap(settings.systemSettings);
+    const updatedSystemSettings: Record<string, string> = {
+      ...existingSysMap,
+      exam_start_flow: selectedFlow,
+    };
+
+    onUpdateSettings({
+      ...settings,
+      examStartFlow: selectedFlow,
+      systemSettings: updatedSystemSettings,
+    });
+
+    try {
+      await fetch('/api/system-settings', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ exam_start_flow: selectedFlow }),
+      });
+    } catch {
+      // Fallback to local state if API unreachable
+    }
+
+    triggerToast(
+      selectedFlow === 'dashboard_first'
+        ? 'Exam Start Behaviour saved: "Go to Dashboard First (Recommended)" (exam_start_flow = dashboard_first).'
+        : 'Exam Start Behaviour saved: "Start Exam Immediately" (exam_start_flow = immediate).'
+    );
+  };
+
+  const handleSaveDefaultCandidatePassword = async () => {
+    const cleanPass = defaultCandidatePasswordDraft.trim();
+    if (!cleanPass) {
+      triggerToast('Please enter a valid master password before saving.');
+      return;
+    }
+
+    let hashedVal = simpleFallbackHash(cleanPass);
+    try {
+      hashedVal = await hashPasswordSha256(cleanPass);
+    } catch {
+      // Fallback hash already computed
+    }
+
+    const existingSysMap = normalizeSystemSettingsMap(settings.systemSettings);
+    const updatedSystemSettings: Record<string, string> = {
+      ...existingSysMap,
+      default_candidate_password: hashedVal,
+    };
+
+    onUpdateSettings({
+      ...settings,
+      defaultCandidatePassword: cleanPass,
+      defaultCandidatePasswordHash: hashedVal,
+      systemSettings: updatedSystemSettings,
+    });
+
+    try {
+      await fetch('/api/system-settings', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ default_candidate_password: cleanPass }),
+      });
+    } catch {
+      // Fallback to local state if API unreachable
+    }
+
+    triggerToast(
+      'Default Candidate Master Password saved & hashed in system_settings (key: default_candidate_password)!'
+    );
   };
 
   // Applies any custom duration (no upper bound) to global settings and active tests
@@ -239,9 +472,85 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
     });
   };
 
-  // Candidate Registry states
+  // Exam Centers / Q-Zones derived from settings
+  const examCenters: ExamCenter[] = useMemo(() => {
+    return settings.examCenters && settings.examCenters.length > 0
+      ? settings.examCenters
+      : DEFAULT_EXAM_CENTERS;
+  }, [settings.examCenters]);
+
+  const [newCenterName, setNewCenterName] = useState<string>('');
+  const [newCenterCapacity, setNewCenterCapacity] = useState<string>('50');
+  const [editingCenterId, setEditingCenterId] = useState<string | null>(null);
+  const [editCenterNameDraft, setEditCenterNameDraft] = useState<string>('');
+  const [editCenterCapDraft, setEditCenterCapDraft] = useState<string>('');
+  const [editCenterCountDraft, setEditCenterCountDraft] = useState<string>('');
+
+  const handleCreateExamCenter = () => {
+    const cleanName = newCenterName.trim();
+    const maxCap = Math.max(1, parseInt(newCenterCapacity, 10) || 50);
+    if (!cleanName) {
+      triggerToast('Please enter a name for the Exam Center / Q-Zone (e.g., Q Zone 1).');
+      return;
+    }
+    const newCenter: ExamCenter = {
+      id: `center-${Date.now()}`,
+      name: cleanName,
+      maxCapacity: maxCap,
+      currentCount: 0,
+    };
+    onUpdateSettings({
+      ...settings,
+      examCenters: [...examCenters, newCenter],
+    });
+    setNewCenterName('');
+    setNewCenterCapacity('50');
+    triggerToast(`Created Exam Center "${cleanName}" (Max Capacity: ${maxCap}).`);
+  };
+
+  const handleStartEditExamCenter = (center: ExamCenter) => {
+    setEditingCenterId(center.id);
+    setEditCenterNameDraft(center.name);
+    setEditCenterCapDraft(String(center.maxCapacity));
+    setEditCenterCountDraft(String(center.currentCount));
+  };
+
+  const handleSaveEditExamCenter = (centerId: string) => {
+    const cleanName = editCenterNameDraft.trim();
+    const maxCap = Math.max(1, parseInt(editCenterCapDraft, 10) || 50);
+    const curCount = Math.max(0, parseInt(editCenterCountDraft, 10) || 0);
+    if (!cleanName) {
+      triggerToast('Exam Center name cannot be empty.');
+      return;
+    }
+    const updatedCenters = examCenters.map((ec) =>
+      ec.id === centerId
+        ? { ...ec, name: cleanName, maxCapacity: maxCap, currentCount: curCount }
+        : ec
+    );
+    onUpdateSettings({
+      ...settings,
+      examCenters: updatedCenters,
+    });
+    setEditingCenterId(null);
+    triggerToast(`Updated Exam Center "${cleanName}" (${curCount}/${maxCap}).`);
+  };
+
+  const handleDeleteExamCenter = (centerId: string) => {
+    const target = examCenters.find((ec) => ec.id === centerId);
+    const updatedCenters = examCenters.filter((ec) => ec.id !== centerId);
+    onUpdateSettings({
+      ...settings,
+      examCenters: updatedCenters,
+    });
+    if (target) {
+      triggerToast(`Deleted Exam Center "${target.name}".`);
+    }
+  };
+
+  // Candidate Registry states (TASK 2: Exact 6-column Bulk Paste format)
   const [pasteText, setPasteText] = useState(
-    `First Name: Chiamaka\nMiddle Name: Blessing\nSurname: Okafor\nRegistration Number: 2027099PHA\nGender: Female\nCategory: Medical`
+    `Chiamaka | Blessing | Okafor | English, Maths, Biology, Chemistry | Medicine | Science\nTunde | - | Bakare | English, Government, Literature, CRS | Law | Art\nZainab | Amina | Bello | English, Maths, Economics, Accounting | Accounting | Commercial`
   );
   const [previewedCandidates, setPreviewedCandidates] = useState<Candidate[]>([]);
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
@@ -260,19 +569,15 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
   const [newMiddleName, setNewMiddleName] = useState('');
   const [newSurname, setNewSurname] = useState('');
   const [newGender, setNewGender] = useState<GenderType>('Male');
-  const [newCategory, setNewCategory] = useState<CategoryType>('Medical');
+  const [newCategory, setNewCategory] = useState<CategoryType>('Science');
+  const [newCourseOfStudy, setNewCourseOfStudy] = useState('');
+  const [newSubjectCombination, setNewSubjectCombination] = useState(
+    'English, Mathematics, Biology, Chemistry'
+  );
+  const [newStateOfOrigin, setNewStateOfOrigin] = useState('');
 
   // Question Bank states
-  const [subjectsList, setSubjectsList] = useState<string[]>([
-    'English',
-    'Biology',
-    'Mathematics',
-    'Physics',
-    'Chemistry',
-    'Economics',
-    'Government',
-    'Literature',
-  ]);
+  const [subjectsList, setSubjectsList] = useState<string[]>(DEFAULT_SUBJECTS_LIST);
   const [qSubject, setQSubject] = useState('English');
   const [questionBanks, setQuestionBanks] = useState<
     { id: string; subject: string; title: string; description: string }[]
@@ -424,20 +729,17 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
         ? targetCombo.subjects
         : Array.from(allComboSubjects);
 
-      const nextAllocations = [...(pt.subjectAllocations || [])];
+      const nextAllocations = { ...(pt.subjectAllocations || {}) };
       relevantSubjects.forEach((subj) => {
         if (
-          !nextAllocations.some(
-            (a) => a.subject.trim().toLowerCase() === subj.trim().toLowerCase()
+          !Object.keys(nextAllocations).some(
+            (a) => a.trim().toLowerCase() === subj.trim().toLowerCase()
           )
         ) {
           const poolCfg = existingPooling.find(
             (sp) => sp.subject.trim().toLowerCase() === subj.trim().toLowerCase()
           );
-          nextAllocations.push({
-            subject: subj,
-            questionCount: poolCfg?.poolSize || 15,
-          });
+          nextAllocations[subj] = poolCfg?.subjectTotal || 15;
         }
       });
 
@@ -595,47 +897,160 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
     setTimeout(() => setCopiedId(null), 2000);
   };
 
-  // Parse pasted text blocks into Candidate objects
-  const parseCandidateBlocks = (raw: string): Candidate[] => {
-    const blocks = raw
+  // Normalize category string to Science, Art, or Commercial
+  const normalizeBulkCategory = (rawCat: string): CategoryType => {
+    const clean = (rawCat || '').trim().toLowerCase();
+    if (clean === 'art' || clean === 'arts') return 'Art';
+    if (clean === 'commercial') return 'Commercial';
+    if (clean === 'science' || clean === 'sciences' || clean === 'medical' || clean === 'engineering') {
+      return 'Science';
+    }
+    return rawCat.trim() || 'Science';
+  };
+
+  // TASK 2: Parse pasted text into Candidate objects (Exact 6-column format + Key-Value block support + Auto-assign Exam Center)
+  const parseCandidateBlocks = (
+    raw: string,
+    mutateCentersClone?: ExamCenter[]
+  ): Candidate[] => {
+    const centersPool = mutateCentersClone
+      ? mutateCentersClone
+      : examCenters.map((ec) => ({ ...ec }));
+
+    const pickNextAvailableCenter = (): { id?: string; name?: string } => {
+      const avail = centersPool.find((ec) => ec.currentCount < ec.maxCapacity);
+      if (!avail) return {};
+      avail.currentCount += 1;
+      return { id: avail.id, name: avail.name };
+    };
+
+    const trimmedRaw = raw.trim();
+    if (!trimmedRaw) return [];
+
+    // Check if the user pasted 6-column rows (delimited by |, tab, or semicolon)
+    const nonEmptyLines = trimmedRaw
+      .split('\n')
+      .map((l) => l.trim())
+      .filter(Boolean);
+
+    const isPipeOrTabFormat = nonEmptyLines.some(
+      (line) => line.includes('|') || line.includes('\t') || line.includes(';')
+    );
+
+    if (isPipeOrTabFormat) {
+      const workingCands = [...candidates];
+      return nonEmptyLines.map((line, idx) => {
+        const delimiter = line.includes('|')
+          ? '|'
+          : line.includes('\t')
+          ? '\t'
+          : ';';
+        const cols = line.split(delimiter).map((c) => c.trim());
+        const fName = cols[0] || `Candidate${idx + 1}`;
+        const rawMid = cols[1] || '';
+        const mName = rawMid === '-' ? '' : rawMid;
+        const sName = cols[2] || `Student${idx + 1}`;
+        const subjComb = cols[3] || 'English, Mathematics, Biology, Chemistry';
+        const course = cols[4] || 'General Studies';
+        const catVal = normalizeBulkCategory(cols[5] || 'Science');
+
+        const assignedZone = pickNextAvailableCenter();
+        const generatedReg = generateUniqueQmtRegNumber(workingCands);
+
+        const newCand: Candidate = {
+          id: `cand-bulk-${Date.now()}-${idx}`,
+          firstName: fName,
+          middleName: mName,
+          surname: sName,
+          gender: 'Female',
+          subjectCombination: subjComb,
+          courseOfStudy: course,
+          category: catVal,
+          examCenterId: assignedZone.id,
+          examCenterName: assignedZone.name,
+          regNumber: generatedReg,
+          pin: `QMT-${Math.floor(100000 + Math.random() * 900000)}`,
+          paymentStatus: 'Paid',
+          paymentMethod: 'Admin Upload',
+          amountPaid: settings.registrationFee,
+          transactionRef: `ADM-UPL-${Date.now().toString().slice(-5)}`,
+          suspended: false,
+          examAssigned: true,
+          examDate: settings.defaultExamDate,
+          examTime: settings.defaultExamTime,
+          createdAt: new Date().toISOString(),
+        };
+        workingCands.push(newCand);
+        return newCand;
+      });
+    }
+
+    // Also support blocks separated by a blank line (either 6 plain lines per block OR Key: Value lines)
+    const blocks = trimmedRaw
       .split(/\n\s*\n/)
       .map((b) => b.trim())
       .filter(Boolean);
 
+    const workingCands = [...candidates];
     return blocks.map((block, idx) => {
-      const lines = block.split('\n');
-      const map: Record<string, string> = {};
-      lines.forEach((line) => {
-        const [k, ...rest] = line.split(':');
-        if (k && rest.length > 0) {
-          map[k.trim().toLowerCase()] = rest.join(':').trim();
-        }
-      });
+      const lines = block.split('\n').map((l) => l.trim()).filter(Boolean);
+      const hasColons = lines.some((l) => l.includes(':'));
 
-      const fName = map['first name'] || 'Candidate';
-      const mName = map['middle name'] || '';
-      const sName = map['surname'] || `User${idx + 1}`;
-      const reg =
-        map['registration number'] ||
-        `2027${String(candidates.length + idx + 15).padStart(3, '0')}PHA`;
-      const rawGender = (map['gender'] || 'Female').toLowerCase();
-      const genderVal: GenderType = rawGender.startsWith('m') ? 'Male' : 'Female';
-      const rawCat = (map['category'] || subjectCombinations[0]?.name || 'Medical').trim();
-      const matchedCombo = subjectCombinations.find(
-        (c) =>
-          c.name.toLowerCase() === rawCat.toLowerCase() ||
-          rawCat.toLowerCase().includes(c.name.toLowerCase())
-      );
-      const catVal: CategoryType = matchedCombo ? matchedCombo.name : rawCat;
+      let fName = 'Candidate';
+      let mName = '';
+      let sName = `User${idx + 1}`;
+      let subjComb = 'English, Mathematics, Biology, Chemistry';
+      let course = '';
+      let catVal: CategoryType = 'Science';
+      let genderVal: GenderType = 'Female';
+      let reg = '';
 
-      return {
+      if (!hasColons && lines.length >= 3) {
+        // 6-line positional block: 1. First Name, 2. Middle Name, 3. Surname, 4. Subject Combination, 5. Course, 6. Category
+        fName = lines[0] || 'Candidate';
+        mName = lines[1] === '-' ? '' : lines[1] || '';
+        sName = lines[2] || `User${idx + 1}`;
+        subjComb = lines[3] || 'English, Mathematics, Biology, Chemistry';
+        course = lines[4] || '';
+        catVal = normalizeBulkCategory(lines[5] || 'Science');
+      } else {
+        const map: Record<string, string> = {};
+        lines.forEach((line) => {
+          const [k, ...rest] = line.split(':');
+          if (k && rest.length > 0) {
+            map[k.trim().toLowerCase()] = rest.join(':').trim();
+          }
+        });
+        fName = map['first name'] || 'Candidate';
+        const rawM = map['middle name'] || '';
+        mName = rawM === '-' ? '' : rawM;
+        sName = map['surname'] || `User${idx + 1}`;
+        subjComb =
+          map['subject combination'] ||
+          map['subjects'] ||
+          'English, Mathematics, Biology, Chemistry';
+        course = map['course'] || map['course of study'] || '';
+        catVal = normalizeBulkCategory(map['category'] || 'Science');
+        const rawGender = (map['gender'] || 'Female').toLowerCase();
+        genderVal = rawGender.startsWith('m') ? 'Male' : 'Female';
+        reg = map['registration number'] || '';
+      }
+
+      const assignedZone = pickNextAvailableCenter();
+      const finalReg = reg || generateUniqueQmtRegNumber(workingCands);
+
+      const newCand: Candidate = {
         id: `cand-bulk-${Date.now()}-${idx}`,
         firstName: fName,
         middleName: mName,
         surname: sName,
         gender: genderVal,
+        subjectCombination: subjComb,
+        courseOfStudy: course,
         category: catVal,
-        regNumber: reg,
+        examCenterId: assignedZone.id,
+        examCenterName: assignedZone.name,
+        regNumber: finalReg,
         pin: `QMT-${Math.floor(100000 + Math.random() * 900000)}`,
         paymentStatus: 'Paid',
         paymentMethod: 'Admin Upload',
@@ -647,6 +1062,8 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
         examTime: settings.defaultExamTime,
         createdAt: new Date().toISOString(),
       };
+      workingCands.push(newCand);
+      return newCand;
     });
   };
 
@@ -656,11 +1073,18 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
   };
 
   const handleSaveAllPasted = () => {
-    const toSave =
-      previewedCandidates.length > 0 ? previewedCandidates : parseCandidateBlocks(pasteText);
+    const updatedCenters = examCenters.map((ec) => ({ ...ec }));
+    const toSave = parseCandidateBlocks(pasteText, updatedCenters);
     if (toSave.length === 0) return;
     onAddCandidatesBulk(toSave);
+    onUpdateSettings({
+      ...settings,
+      examCenters: updatedCenters,
+    });
     setPreviewedCandidates([]);
+    triggerToast(
+      `Saved ${toSave.length} bulk-pasted candidate(s) and auto-assigned to available Exam Centers / Q-Zones!`
+    );
   };
 
   const isFreeRegistration = Boolean(
@@ -1235,6 +1659,8 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
             <h1 className="text-xl md:text-2xl font-extrabold tracking-tight">
               {activeTab === 'Settings / Create Exam'
                 ? 'Exam Creation & Settings'
+                : activeTab === 'Exam Centers'
+                ? 'Examination Centre'
                 : activeTab}
             </h1>
           </div>
@@ -1251,13 +1677,23 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
             <span>Candidate / GREEN BOX View</span>
           </button>
 
-          {/* Proctoring Toggle Pill */}
+          {/* Camera Access Required / Proctoring Toggle Pill */}
           <div className="flex items-center gap-1 p-1 rounded-full bg-neutral-100 border border-neutral-200 text-xs font-bold">
             <Video className="w-3.5 h-3.5 text-[#0a6b3c] ml-2 mr-1" />
+            <span className="hidden sm:inline text-[10px] font-extrabold uppercase text-neutral-700 mr-1">
+              Camera Required:
+            </span>
             <button
               type="button"
               onClick={() =>
-                onUpdateSettings({ ...settings, proctoringEnabled: true })
+                onUpdateSettings({
+                  ...settings,
+                  proctoringEnabled: true,
+                  publishedTests: (settings.publishedTests || []).map((pt) => ({
+                    ...pt,
+                    requireCamera: true,
+                  })),
+                })
               }
               className={`px-3 py-1 rounded-full text-[11px] font-extrabold transition-colors cursor-pointer ${
                 settings.proctoringEnabled
@@ -1270,7 +1706,14 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
             <button
               type="button"
               onClick={() =>
-                onUpdateSettings({ ...settings, proctoringEnabled: false })
+                onUpdateSettings({
+                  ...settings,
+                  proctoringEnabled: false,
+                  publishedTests: (settings.publishedTests || []).map((pt) => ({
+                    ...pt,
+                    requireCamera: false,
+                  })),
+                })
               }
               className={`px-3 py-1 rounded-full text-[11px] font-extrabold transition-colors cursor-pointer ${
                 !settings.proctoringEnabled
@@ -1322,6 +1765,11 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
               label: `Candidates (${candidates.length})`,
               icon: Users,
               badge: pendingCount > 0 ? `${pendingCount} Pending` : undefined,
+            },
+            {
+              id: 'Exam Centers',
+              label: `Examination Centre (${examCenters.length})`,
+              icon: MapPin,
             },
             { id: 'Question bank', label: 'Question bank', icon: BookOpen },
             { id: 'Results', label: 'Results', icon: FileText },
@@ -2010,7 +2458,18 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                       const matchedCombo = subjectCombinations.find(
                         (sc) => sc.name.trim().toLowerCase() === cand.category.trim().toLowerCase()
                       );
-                      const comboSubjects = matchedCombo ? matchedCombo.subjects : [];
+                      const customSubjects = cand.subjectCombination
+                        ? cand.subjectCombination
+                            .split(',')
+                            .map((s) => s.trim())
+                            .filter(Boolean)
+                        : [];
+                      const comboSubjects =
+                        customSubjects.length > 0
+                          ? customSubjects
+                          : matchedCombo
+                          ? matchedCombo.subjects
+                          : [];
                       return (
                         <tr key={cand.id} className="hover:bg-neutral-50">
                           <td className="py-3.5 px-3">
@@ -2045,8 +2504,18 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                                 >
                                   {cand.firstName} {cand.middleName} {cand.surname}
                                 </button>
-                                <div className="text-[11px] text-neutral-500">
+                                <div className="text-[11px] text-neutral-500 flex flex-wrap items-center gap-1.5">
                                   <span className="font-semibold text-neutral-700">{cand.gender}</span>
+                                  {cand.courseOfStudy && (
+                                    <span className="text-[#0a6b3c] font-bold">
+                                      • {cand.courseOfStudy}
+                                    </span>
+                                  )}
+                                  {cand.examCenterName && (
+                                    <span className="px-1.5 py-0.5 rounded bg-neutral-100 text-neutral-700 font-bold text-[10px]">
+                                      {cand.examCenterName}
+                                    </span>
+                                  )}
                                 </div>
                               </div>
                             </div>
@@ -2064,11 +2533,11 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                                 const newCat = e.target.value;
                                 onUpdateCandidate({ ...cand, category: newCat });
                                 triggerToast(
-                                  `Updated ${cand.firstName} ${cand.surname}'s Subject Combination to "${newCat}".`
+                                  `Updated ${cand.firstName} ${cand.surname}'s Category to "${newCat}".`
                                 );
                               }}
                               className="px-2.5 py-1 rounded-full bg-[#0a6b3c] text-white text-[10px] font-extrabold uppercase cursor-pointer border border-[#0a6b3c] focus:outline-none"
-                              title="Click to change candidate's Subject Combination (Category)"
+                              title="Click to change candidate's Category (Science, Art, Commercial)"
                             >
                               {!subjectCombinations.some(
                                 (c) =>
@@ -2090,7 +2559,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                               ))}
                             </select>
                             {comboSubjects.length > 0 && (
-                              <div className="text-[10px] text-neutral-500 mt-1 max-w-[180px] truncate" title={comboSubjects.join(', ')}>
+                              <div className="text-[10px] text-neutral-500 mt-1 max-w-[200px] truncate" title={comboSubjects.join(', ')}>
                                 {comboSubjects.join(', ')}
                               </div>
                             )}
@@ -2239,21 +2708,30 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
               </div>
             </section>
 
-            {/* SECTION B: Paste candidates in normal text (Matches Screenshot 2, 4, 5) */}
+            {/* SECTION B: Paste candidates in normal text (TASK 2: Exact 6-Column Base Format) */}
             <section className="p-6 rounded-2xl border border-neutral-200 bg-white text-black shadow-xs space-y-4">
-              <div>
-                <h2 className="text-base font-extrabold text-black">
-                  Paste candidates in normal text
-                </h2>
-                <p className="text-xs text-neutral-500 mt-0.5">
-                  Paste one or many candidates separated by a blank line.
-                </p>
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+                <div>
+                  <h2 className="text-base font-extrabold text-black">
+                    Add Students — Bulk Paste (6-Column Format)
+                  </h2>
+                  <p className="text-xs text-neutral-500 mt-0.5">
+                    Format per line:{' '}
+                    <span className="font-mono font-bold text-[#0a6b3c]">
+                      First Name | Middle Name (or &quot;-&quot;) | Surname | Subject Combination | Course | Category (Art, Science, Commercial)
+                    </span>
+                  </p>
+                </div>
+                <span className="px-3 py-1 rounded-full bg-[#0a6b3c]/10 border border-[#0a6b3c]/30 text-[#0a6b3c] text-[11px] font-extrabold">
+                  Auto-assigns to first available Examination Centre
+                </span>
               </div>
 
               <textarea
                 rows={6}
                 value={pasteText}
                 onChange={(e) => setPasteText(e.target.value)}
+                placeholder="First Name | Middle Name (or -) | Surname | English, Maths, Biology, Chemistry | Medicine | Science"
                 className="w-full p-4 rounded-xl border border-neutral-300 focus:border-[#0a6b3c] focus:outline-none font-mono text-xs text-black bg-neutral-50"
               />
 
@@ -2270,24 +2748,43 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                   onClick={handleSaveAllPasted}
                   className="px-5 py-2.5 rounded-xl bg-[#0a6b3c] hover:bg-[#0e8a4e] text-white text-xs font-extrabold transition-colors cursor-pointer"
                 >
-                  Save all candidates
+                  Save all candidates &amp; Assign Examination Centre
                 </button>
               </div>
 
               {previewedCandidates.length > 0 && (
                 <div className="p-4 rounded-xl bg-[#0a6b3c]/5 border border-[#0a6b3c] space-y-2">
                   <div className="text-xs font-extrabold text-[#0a6b3c]">
-                    Previewed {previewedCandidates.length} Candidate(s) — Click "Save all candidates" to commit:
+                    Previewed {previewedCandidates.length} Candidate(s) — Click &quot;Save all candidates &amp; Assign Examination Centre&quot; to commit:
                   </div>
                   {previewedCandidates.map((pc) => (
-                    <div key={pc.id} className="text-xs text-black flex items-center gap-3">
-                      <span className="font-bold">
-                        {pc.firstName} {pc.middleName} {pc.surname}
+                    <div
+                      key={pc.id}
+                      className="text-xs text-black flex flex-wrap items-center gap-2.5 py-1 border-b border-[#0a6b3c]/15 last:border-b-0"
+                    >
+                      <span className="font-extrabold">
+                        {pc.firstName} {pc.middleName ? `${pc.middleName} ` : ''}
+                        {pc.surname}
                       </span>
                       <span className="font-mono text-neutral-600">{pc.regNumber}</span>
-                      <span className="px-2 py-0.5 rounded bg-[#0a6b3c] text-white text-[10px] font-bold">
+                      <span className="px-2 py-0.5 rounded bg-[#0a6b3c] text-white text-[10px] font-bold uppercase">
                         {pc.category}
                       </span>
+                      {pc.courseOfStudy && (
+                        <span className="px-2 py-0.5 rounded bg-white border border-neutral-300 text-black text-[10px] font-bold">
+                          Course: {pc.courseOfStudy}
+                        </span>
+                      )}
+                      {pc.subjectCombination && (
+                        <span className="text-[11px] text-neutral-700 font-semibold">
+                          [{pc.subjectCombination}]
+                        </span>
+                      )}
+                      {pc.examCenterName && (
+                        <span className="px-2 py-0.5 rounded bg-[#0a6b3c]/15 text-[#0a6b3c] text-[10px] font-extrabold">
+                          Examination Centre: {pc.examCenterName}
+                        </span>
+                      )}
                     </div>
                   ))}
                 </div>
@@ -2503,13 +3000,25 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                                     </span>
                                   )}
                                 </div>
-                                <div className="text-[11px] text-neutral-500">
-                                  {cand.paymentStatus === 'Paid'
-                                    ? 'Approved (Reg No Active)'
-                                    : 'Pending Admin Approval'}
-                                  {!isFreeRegistration &&
-                                    cand.paymentMethod !== 'Free Registration' &&
-                                    ` • PIN: ${cand.pin || 'Pending'}`}
+                                <div className="text-[11px] text-neutral-500 flex flex-wrap items-center gap-1.5">
+                                  <span>
+                                    {cand.paymentStatus === 'Paid'
+                                      ? 'Approved (Reg No Active)'
+                                      : 'Pending Admin Approval'}
+                                    {!isFreeRegistration &&
+                                      cand.paymentMethod !== 'Free Registration' &&
+                                      ` • PIN: ${cand.pin || 'Pending'}`}
+                                  </span>
+                                  {cand.courseOfStudy && (
+                                    <span className="text-[#0a6b3c] font-bold">
+                                      • {cand.courseOfStudy}
+                                    </span>
+                                  )}
+                                  {cand.examCenterName && (
+                                    <span className="px-1.5 py-0.5 rounded bg-[#0a6b3c]/10 text-[#0a6b3c] font-bold text-[10px]">
+                                      {cand.examCenterName}
+                                    </span>
+                                  )}
                                 </div>
                               </div>
                             </div>
@@ -2534,11 +3043,11 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                                 const newCat = e.target.value;
                                 onUpdateCandidate({ ...cand, category: newCat });
                                 triggerToast(
-                                  `Updated ${cand.firstName} ${cand.surname}'s Subject Combination to "${newCat}".`
+                                  `Updated ${cand.firstName} ${cand.surname}'s Category to "${newCat}".`
                                 );
                               }}
                               className="px-3 py-1 rounded-full bg-[#0a6b3c] text-white text-[10px] font-extrabold uppercase tracking-wider cursor-pointer border border-[#0a6b3c] focus:outline-none"
-                              title="Click to change candidate's Subject Combination (Category)"
+                              title="Click to change candidate's Category (Science, Art, Commercial)"
                             >
                               {!subjectCombinations.some(
                                 (c) =>
@@ -2555,10 +3064,18 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                                   value={combo.name}
                                   className="bg-white text-black font-bold"
                                 >
-                                  {combo.name} ({combo.subjects.join(', ')})
+                                  {combo.name}
                                 </option>
                               ))}
                             </select>
+                            {cand.subjectCombination && (
+                              <div
+                                className="text-[10px] text-neutral-500 mt-1 max-w-[200px] truncate"
+                                title={cand.subjectCombination}
+                              >
+                                {cand.subjectCombination}
+                              </div>
+                            )}
                           </td>
                           <td className="py-3.5 px-4 text-right">
                             <div className="inline-flex items-center justify-end gap-2">
@@ -2627,6 +3144,311 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                   </tbody>
                 </table>
               </div>
+            </section>
+          </div>
+        )}
+
+        {/* TAB 2B: EXAMINATION CENTRE ADMIN */}
+        {activeTab === 'Exam Centers' && (
+          <div className="space-y-6">
+            {/* Top Create Examination Centre Card */}
+            <section className="p-6 rounded-2xl border border-neutral-200 bg-white text-black shadow-xs space-y-4">
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+                <div>
+                  <span className="text-xs font-extrabold uppercase tracking-wider text-[#0a6b3c]">
+                    EXAMINATION CENTRE MANAGEMENT
+                  </span>
+                  <h2 className="text-lg font-extrabold text-black mt-0.5">
+                    Create &amp; Manage Examination Centres
+                  </h2>
+                  <p className="text-xs text-neutral-500 mt-0.5">
+                    Students self-registering see only centres where{' '}
+                    <span className="font-mono font-bold text-black">
+                      current_count &lt; max_capacity
+                    </span>
+                    . Admin bulk paste automatically assigns candidates to the first available Examination Centre.
+                  </p>
+                </div>
+                <div className="px-3.5 py-2 rounded-xl bg-[#0a6b3c]/10 border border-[#0a6b3c] text-right">
+                  <span className="block text-[10px] font-extrabold uppercase text-[#0a6b3c]">
+                    Total Available Slots
+                  </span>
+                  <span className="text-base font-extrabold text-black tabular-nums">
+                    {examCenters.reduce(
+                      (acc, c) => acc + Math.max(0, c.maxCapacity - c.currentCount),
+                      0
+                    )}{' '}
+                    / {examCenters.reduce((acc, c) => acc + c.maxCapacity, 0)}
+                  </span>
+                </div>
+              </div>
+
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 pt-2">
+                <div>
+                  <label className="block text-xs font-extrabold text-neutral-700 mb-1">
+                    Examination Centre Name *
+                  </label>
+                  <input
+                    type="text"
+                    value={newCenterName}
+                    onChange={(e) => setNewCenterName(e.target.value)}
+                    placeholder="e.g., Main Hall, Centre 1, North Wing"
+                    className="w-full px-3.5 py-2.5 rounded-xl border border-neutral-300 focus:border-[#0a6b3c] focus:outline-none text-xs font-semibold text-black"
+                  />
+                </div>
+                <div>
+                  <label className="block text-xs font-extrabold text-neutral-700 mb-1">
+                    Max Capacity (Any Number) *
+                  </label>
+                  <input
+                    type="number"
+                    min={1}
+                    value={newCenterCapacity}
+                    onChange={(e) => setNewCenterCapacity(e.target.value)}
+                    placeholder="e.g., 50, 120, 250"
+                    className="w-full px-3.5 py-2.5 rounded-xl border border-neutral-300 focus:border-[#0a6b3c] focus:outline-none text-xs font-semibold text-black font-mono"
+                  />
+                </div>
+                <div className="flex items-end">
+                  <button
+                    type="button"
+                    onClick={handleCreateExamCenter}
+                    className="w-full px-5 py-2.5 rounded-xl bg-[#0a6b3c] hover:bg-[#0e8a4e] text-white text-xs font-extrabold flex items-center justify-center gap-1.5 transition-colors cursor-pointer"
+                  >
+                    <Plus className="w-4 h-4" />
+                    <span>Create Examination Centre</span>
+                  </button>
+                </div>
+              </div>
+            </section>
+
+            {/* Examination Centres List with Fill Rate, Edit & Delete */}
+            <section className="p-6 rounded-2xl border border-neutral-200 bg-white text-black shadow-xs space-y-4">
+              <div className="flex items-center justify-between">
+                <div>
+                  <h3 className="text-base font-extrabold text-black">
+                    Active Examination Centres ({examCenters.length})
+                  </h3>
+                  <p className="text-xs text-neutral-500">
+                    Real-time capacity tracking, fill rate percentage, and slot availability.
+                  </p>
+                </div>
+              </div>
+
+              <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+                {examCenters.map((center) => {
+                  const slotsLeft = Math.max(0, center.maxCapacity - center.currentCount);
+                  const fillPercent =
+                    center.maxCapacity > 0
+                      ? Math.min(100, Math.round((center.currentCount / center.maxCapacity) * 100))
+                      : 100;
+                  const isFull = slotsLeft === 0;
+                  const isEditing = editingCenterId === center.id;
+
+                  return (
+                    <div
+                      key={center.id}
+                      className={`p-4 rounded-2xl border-2 transition-all space-y-3 ${
+                        isFull
+                          ? 'border-red-300 bg-red-50/40'
+                          : 'border-[#0a6b3c]/30 bg-neutral-50 hover:border-[#0a6b3c]'
+                      }`}
+                    >
+                      {isEditing ? (
+                        <div className="space-y-2.5 text-xs">
+                          <div>
+                            <label className="block font-bold text-neutral-700 mb-0.5">
+                              Examination Centre Name
+                            </label>
+                            <input
+                              type="text"
+                              value={editCenterNameDraft}
+                              onChange={(e) => setEditCenterNameDraft(e.target.value)}
+                              className="w-full px-2.5 py-1.5 rounded-lg border border-neutral-300 bg-white font-bold"
+                            />
+                          </div>
+                          <div className="grid grid-cols-2 gap-2">
+                            <div>
+                              <label className="block font-bold text-neutral-700 mb-0.5">
+                                Current Count
+                              </label>
+                              <input
+                                type="number"
+                                min={0}
+                                value={editCenterCountDraft}
+                                onChange={(e) => setEditCenterCountDraft(e.target.value)}
+                                className="w-full px-2.5 py-1.5 rounded-lg border border-neutral-300 bg-white font-mono"
+                              />
+                            </div>
+                            <div>
+                              <label className="block font-bold text-neutral-700 mb-0.5">
+                                Max Capacity
+                              </label>
+                              <input
+                                type="number"
+                                min={1}
+                                value={editCenterCapDraft}
+                                onChange={(e) => setEditCenterCapDraft(e.target.value)}
+                                className="w-full px-2.5 py-1.5 rounded-lg border border-neutral-300 bg-white font-mono"
+                              />
+                            </div>
+                          </div>
+                          <div className="flex items-center justify-end gap-2 pt-1">
+                            <button
+                              type="button"
+                              onClick={() => setEditingCenterId(null)}
+                              className="px-3 py-1.5 rounded-lg border border-neutral-300 bg-white text-neutral-700 font-bold cursor-pointer"
+                            >
+                              Cancel
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => handleSaveEditExamCenter(center.id)}
+                              className="px-3 py-1.5 rounded-lg bg-[#0a6b3c] text-white font-extrabold cursor-pointer"
+                            >
+                              Save
+                            </button>
+                          </div>
+                        </div>
+                      ) : (
+                        <>
+                          <div className="flex items-start justify-between gap-2">
+                            <div className="flex items-center gap-2">
+                              <div className="w-8 h-8 rounded-xl bg-[#0a6b3c] text-white flex items-center justify-center shrink-0">
+                                <MapPin className="w-4 h-4" />
+                              </div>
+                              <div>
+                                <h4 className="font-extrabold text-sm text-black">
+                                  {center.name}
+                                </h4>
+                                <span
+                                  className={`inline-block text-[11px] font-extrabold ${
+                                    isFull ? 'text-red-600' : 'text-[#0a6b3c]'
+                                  }`}
+                                >
+                                  {isFull
+                                    ? 'FULL (0 slots left)'
+                                    : `${center.name} - ${slotsLeft} left`}
+                                </span>
+                              </div>
+                            </div>
+
+                            <div className="flex items-center gap-1">
+                              <button
+                                type="button"
+                                onClick={() => handleStartEditExamCenter(center)}
+                                className="p-1.5 rounded-lg border border-neutral-300 bg-white hover:border-[#0a6b3c] text-neutral-700 cursor-pointer"
+                                title="Edit Exam Center"
+                              >
+                                <Edit3 className="w-3.5 h-3.5" />
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => handleDeleteExamCenter(center.id)}
+                                className="p-1.5 rounded-lg border border-red-200 bg-red-50 hover:bg-red-100 text-red-600 cursor-pointer"
+                                title="Delete Exam Center"
+                              >
+                                <Trash2 className="w-3.5 h-3.5" />
+                              </button>
+                            </div>
+                          </div>
+
+                          <div className="space-y-1.5">
+                            <div className="flex items-center justify-between text-xs">
+                              <span className="text-neutral-600 font-semibold">
+                                Assigned: <strong className="text-black">{center.currentCount}</strong> /{' '}
+                                {center.maxCapacity}
+                              </span>
+                              <span className="font-mono font-extrabold text-black">
+                                {fillPercent}% Full
+                              </span>
+                            </div>
+                            <div className="w-full h-2.5 rounded-full bg-neutral-200 overflow-hidden">
+                              <div
+                                className={`h-full transition-all ${
+                                  isFull ? 'bg-red-600' : 'bg-[#0a6b3c]'
+                                }`}
+                                style={{ width: `${fillPercent}%` }}
+                              />
+                            </div>
+                          </div>
+                        </>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+            </section>
+
+            {/* Non-Destructive Supabase Migration SQL Card */}
+            <section className="p-6 rounded-2xl border border-neutral-200 bg-white text-black shadow-xs space-y-3">
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+                <div className="flex items-center gap-2">
+                  <Database className="w-4 h-4 text-[#0a6b3c]" />
+                  <h3 className="text-sm font-extrabold text-black">
+                    Supabase Non-Destructive Migration SQL (ADD Columns &amp; Exam Centers Table)
+                  </h3>
+                </div>
+                <button
+                  type="button"
+                  onClick={() =>
+                    handleCopy(
+                      `CREATE TABLE IF NOT EXISTS public.exam_centers (\n  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),\n  name TEXT NOT NULL UNIQUE,\n  max_capacity INTEGER NOT NULL DEFAULT 50 CHECK (max_capacity > 0),\n  current_count INTEGER NOT NULL DEFAULT 0 CHECK (current_count >= 0),\n  created_at TIMESTAMPTZ NOT NULL DEFAULT now()\n);\n\nALTER TABLE public.students\n  ADD COLUMN IF NOT EXISTS first_name TEXT,\n  ADD COLUMN IF NOT EXISTS middle_name TEXT,\n  ADD COLUMN IF NOT EXISTS surname TEXT,\n  ADD COLUMN IF NOT EXISTS subject_combination TEXT,\n  ADD COLUMN IF NOT EXISTS course_of_study TEXT,\n  ADD COLUMN IF NOT EXISTS category TEXT CHECK (category IN ('Art', 'Science', 'Commercial')),\n  ADD COLUMN IF NOT EXISTS state_of_origin TEXT,\n  ADD COLUMN IF NOT EXISTS password_hash TEXT,\n  ADD COLUMN IF NOT EXISTS exam_center_id UUID REFERENCES public.exam_centers(id) ON DELETE SET NULL;\n\nCREATE TABLE IF NOT EXISTS public.system_settings (\n  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),\n  key TEXT NOT NULL UNIQUE,\n  value TEXT NOT NULL,\n  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),\n  updated_at TIMESTAMPTZ NOT NULL DEFAULT now()\n);\n\nINSERT INTO public.system_settings (key, value)\nVALUES\n  ('exam_start_flow', 'dashboard_first'),\n  ('default_candidate_password', '9b871512327c09ce91dd649b3f96a63b7408ef267c8cc5710114e629730cb61f')\nON CONFLICT (key) DO UPDATE\nSET value = EXCLUDED.value,\n    updated_at = now();`,
+                      'supabase-migration-sql'
+                    )
+                  }
+                  className="px-3.5 py-1.5 rounded-xl bg-[#0a6b3c] hover:bg-[#0e8a4e] text-white text-xs font-extrabold inline-flex items-center gap-1.5 cursor-pointer"
+                >
+                  {copiedId === 'supabase-migration-sql' ? (
+                    <>
+                      <Check className="w-3.5 h-3.5" />
+                      <span>Copied Migration SQL!</span>
+                    </>
+                  ) : (
+                    <>
+                      <Copy className="w-3.5 h-3.5" />
+                      <span>Copy Supabase SQL</span>
+                    </>
+                  )}
+                </button>
+              </div>
+              <pre className="p-4 rounded-xl bg-neutral-900 text-emerald-400 font-mono text-[11px] overflow-x-auto leading-relaxed">
+{`-- Non-destructive migration: Keeps all existing student columns (email, phone, password, etc.)
+CREATE TABLE IF NOT EXISTS public.exam_centers (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  name TEXT NOT NULL UNIQUE,
+  max_capacity INTEGER NOT NULL DEFAULT 50 CHECK (max_capacity > 0),
+  current_count INTEGER NOT NULL DEFAULT 0 CHECK (current_count >= 0),
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+ALTER TABLE public.students
+  ADD COLUMN IF NOT EXISTS first_name TEXT,
+  ADD COLUMN IF NOT EXISTS middle_name TEXT,
+  ADD COLUMN IF NOT EXISTS surname TEXT,
+  ADD COLUMN IF NOT EXISTS subject_combination TEXT,
+  ADD COLUMN IF NOT EXISTS course_of_study TEXT,
+  ADD COLUMN IF NOT EXISTS category TEXT CHECK (category IN ('Art', 'Science', 'Commercial')),
+  ADD COLUMN IF NOT EXISTS state_of_origin TEXT,
+  ADD COLUMN IF NOT EXISTS password_hash TEXT,
+  ADD COLUMN IF NOT EXISTS exam_center_id UUID REFERENCES public.exam_centers(id) ON DELETE SET NULL;
+
+CREATE TABLE IF NOT EXISTS public.system_settings (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  key TEXT NOT NULL UNIQUE,
+  value TEXT NOT NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+INSERT INTO public.system_settings (key, value)
+VALUES
+  ('exam_start_flow', 'dashboard_first'),
+  ('default_candidate_password', '9b871512327c09ce91dd649b3f96a63b7408ef267c8cc5710114e629730cb61f')
+ON CONFLICT (key) DO UPDATE
+SET value = EXCLUDED.value,
+    updated_at = now();`}
+              </pre>
             </section>
           </div>
         )}
@@ -3433,6 +4255,49 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                     <Download className="w-4 h-4" />
                     <span>Export Ranked PDF</span>
                   </button>
+                </div>
+              </div>
+
+              {/* Publish Ranking Per Exam Control Banner */}
+              <div className="p-4 rounded-2xl border-2 border-[#0a6b3c]/30 bg-[#0a6b3c]/5 flex flex-col lg:flex-row lg:items-center justify-between gap-3">
+                <div className="space-y-0.5">
+                  <div className="flex items-center gap-2">
+                    <Trophy className="w-4 h-4 text-[#0a6b3c]" />
+                    <span className="text-xs font-extrabold uppercase tracking-wider text-[#0a6b3c]">
+                      PUBLISH CANDIDATE RANKING CONTROL (PER EXAM)
+                    </span>
+                  </div>
+                  <p className="text-xs text-neutral-600">
+                    Candidate ranking is <strong>only shown on candidate results</strong> when you click <strong>Publish Ranking</strong> for that exam. If unpublished, the word &quot;Ranking&quot; completely disappears from candidate results and slips.
+                  </p>
+                </div>
+                <div className="flex flex-wrap items-center gap-2">
+                  {(settings.publishedTests || []).map((pt) => {
+                    const isRankPub = Boolean(
+                      pt.rankingPublished ||
+                        (settings.rankingPublishedByTestId &&
+                          settings.rankingPublishedByTestId[pt.id])
+                    );
+                    return (
+                      <button
+                        key={pt.id}
+                        type="button"
+                        onClick={() => handleTogglePublishRankingForTest(pt.id)}
+                        className={`px-4 py-2 rounded-xl text-xs font-extrabold flex items-center gap-1.5 transition-colors cursor-pointer shadow-2xs ${
+                          isRankPub
+                            ? 'bg-[#0a6b3c] text-white hover:bg-[#0e8a4e]'
+                            : 'bg-white border-2 border-[#0a6b3c] text-[#0a6b3c] hover:bg-[#0a6b3c]/10'
+                        }`}
+                      >
+                        <Trophy className="w-3.5 h-3.5" />
+                        <span>
+                          {isRankPub
+                            ? `Ranking Published: ${pt.title} (Click to Unpublish)`
+                            : `Publish Ranking: ${pt.title}`}
+                        </span>
+                      </button>
+                    );
+                  })}
                 </div>
               </div>
 
@@ -4402,6 +5267,135 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                   Save exam title &amp; subtitles
                 </button>
               </div>
+
+              {/* DYNAMIC CANDIDATE RESULT SLIP INFORMATION CONFIGURATOR */}
+              <div className="pt-6 border-t border-neutral-200 space-y-4">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <div>
+                    <div className="flex items-center gap-1.5 text-xs font-extrabold uppercase tracking-wider text-[#0a6b3c]">
+                      <FileText className="w-4 h-4" />
+                      <span>DYNAMIC CANDIDATE RESULT SLIP INFORMATION</span>
+                    </div>
+                    <h3 className="text-base font-extrabold text-black mt-0.5">
+                      Add or Remove Registration Details Shown on Result Slips
+                    </h3>
+                    <p className="text-xs text-neutral-500 mt-0.5">
+                      Toggle which candidate registration details appear on the candidate result slip and PDF. By default, <strong>Examination Centre</strong>, <strong>Course</strong>, <strong>State of Origin</strong>, and <strong>Current Ranking</strong> are enabled. Note: <strong>Current Ranking</strong> only appears on candidate results when you click <strong>Publish Ranking</strong> on that exam.
+                    </p>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      onUpdateSettings({
+                        ...settings,
+                        resultSlipFields: DEFAULT_RESULT_SLIP_FIELDS,
+                      });
+                      triggerToast('Result slip fields reset to official defaults!');
+                    }}
+                    className="px-3 py-1.5 rounded-xl border border-neutral-300 hover:border-[#0a6b3c] text-xs font-extrabold text-neutral-700 hover:text-[#0a6b3c] cursor-pointer"
+                  >
+                    Reset Fields to Default
+                  </button>
+                </div>
+
+                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
+                  {effectiveResultSlipFields.map((field) => (
+                    <div
+                      key={field.key}
+                      className={`p-3.5 rounded-2xl border-2 flex flex-col justify-between gap-2.5 transition-all ${
+                        field.enabled
+                          ? 'border-[#0a6b3c] bg-[#0a6b3c]/5'
+                          : 'border-neutral-200 bg-neutral-50 opacity-75'
+                      }`}
+                    >
+                      <div className="flex items-start justify-between gap-2">
+                        <label className="flex items-center gap-2 cursor-pointer flex-1">
+                          <input
+                            type="checkbox"
+                            checked={field.enabled}
+                            onChange={() => handleToggleResultSlipField(field.key)}
+                            className="w-4 h-4 accent-[#0a6b3c] cursor-pointer"
+                          />
+                          <span className="text-xs font-extrabold text-black">
+                            {field.label}
+                          </span>
+                        </label>
+                        {field.isCustom ? (
+                          <button
+                            type="button"
+                            onClick={() => handleDeleteCustomResultSlipField(field.key)}
+                            className="p-1 rounded-lg text-red-600 hover:bg-red-50 cursor-pointer"
+                            title="Remove custom field"
+                          >
+                            <Trash2 className="w-3.5 h-3.5" />
+                          </button>
+                        ) : (
+                          <span
+                            className={`px-2 py-0.5 rounded-full text-[10px] font-extrabold uppercase ${
+                              field.enabled
+                                ? 'bg-[#0a6b3c] text-white'
+                                : 'bg-neutral-200 text-neutral-600'
+                            }`}
+                          >
+                            {field.enabled ? 'Shown' : 'Hidden'}
+                          </span>
+                        )}
+                      </div>
+
+                      <div className="flex items-center gap-1.5">
+                        <span className="text-[10px] font-bold text-neutral-500 shrink-0">
+                          Slip Label:
+                        </span>
+                        <input
+                          type="text"
+                          value={field.label}
+                          onChange={(e) =>
+                            handleUpdateResultSlipFieldLabel(field.key, e.target.value)
+                          }
+                          className="w-full px-2 py-1 rounded-lg border border-neutral-300 focus:border-[#0a6b3c] focus:outline-none text-[11px] font-bold bg-white text-black"
+                        />
+                      </div>
+
+                      {field.key === 'currentRanking' && (
+                        <div className="text-[10px] font-bold text-[#0a6b3c] bg-white/80 px-2 py-1 rounded border border-[#0a6b3c]/25">
+                          Requires &quot;Publish Ranking&quot; active on the exam to show on candidate results.
+                        </div>
+                      )}
+                    </div>
+                  ))}
+                </div>
+
+                {/* Add Custom Information Field to Result Slip */}
+                <div className="p-4 rounded-2xl bg-neutral-50 border border-neutral-200 space-y-3">
+                  <div className="text-xs font-extrabold text-black">
+                    + Add Additional Custom Information Field to Candidate Result Slip
+                  </div>
+                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                    <input
+                      type="text"
+                      value={customSlipFieldLabel}
+                      onChange={(e) => setCustomSlipFieldLabel(e.target.value)}
+                      placeholder="Field Label (e.g., Academic Session, Batch)"
+                      className="px-3.5 py-2.5 rounded-xl border border-neutral-300 focus:border-[#0a6b3c] focus:outline-none text-xs font-semibold text-black bg-white"
+                    />
+                    <input
+                      type="text"
+                      value={customSlipFieldValue}
+                      onChange={(e) => setCustomSlipFieldValue(e.target.value)}
+                      placeholder="Value / Default Text (e.g., 2026/2027 Session)"
+                      className="px-3.5 py-2.5 rounded-xl border border-neutral-300 focus:border-[#0a6b3c] focus:outline-none text-xs font-semibold text-black bg-white"
+                    />
+                    <button
+                      type="button"
+                      onClick={handleAddCustomResultSlipField}
+                      className="px-4 py-2.5 rounded-xl bg-[#0a6b3c] hover:bg-[#0e8a4e] text-white text-xs font-extrabold flex items-center justify-center gap-1.5 cursor-pointer"
+                    >
+                      <Plus className="w-4 h-4" />
+                      <span>Add Field to Result Slip</span>
+                    </button>
+                  </div>
+                </div>
+              </div>
             </section>
 
             {/* CARD 3: Exam Control (Screenshot_20261023-163247_d5713fc8.png) */}
@@ -4614,6 +5608,203 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                       </span>
                     </button>
                   </div>
+                </div>
+              </div>
+            </section>
+
+            {/* TASK 1: ADMIN PANEL > SETTINGS > EXAM FLOW SETTINGS */}
+            <section className="p-6 md:p-7 rounded-3xl border-2 border-[#0a6b3c] bg-white text-black shadow-xs space-y-5">
+              <div className="space-y-1.5">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <div className="flex items-center gap-1.5 text-xs font-extrabold uppercase tracking-wider text-[#0a6b3c]">
+                    <Settings className="w-4 h-4" />
+                    <span>ADMIN PANEL &gt; SETTINGS &gt; EXAM FLOW SETTINGS</span>
+                  </div>
+                  <span className="px-3 py-1 rounded-full bg-[#0a6b3c]/10 border border-[#0a6b3c]/30 text-[#0a6b3c] font-mono text-[10px] font-extrabold">
+                    system_settings: exam_start_flow = &quot;{examStartFlowDraft}&quot;
+                  </span>
+                </div>
+                <h2 className="text-lg font-extrabold text-black">
+                  Exam Start Behaviour
+                </h2>
+                <p className="text-xs text-neutral-500 leading-relaxed">
+                  Choose what happens after student enters correct password
+                </p>
+              </div>
+
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                {/* Option 1: Go to Dashboard First (Recommended) */}
+                <label
+                  onClick={() => setExamStartFlowDraft('dashboard_first')}
+                  className={`p-4 rounded-2xl border-2 cursor-pointer transition-all flex flex-col justify-between gap-3 ${
+                    examStartFlowDraft === 'dashboard_first'
+                      ? 'border-[#0a6b3c] bg-[#0a6b3c]/8 shadow-xs'
+                      : 'border-neutral-200 bg-neutral-50 hover:border-neutral-300'
+                  }`}
+                >
+                  <div className="space-y-2">
+                    <div className="flex items-start justify-between gap-2">
+                      <div className="flex items-center gap-2.5">
+                        <input
+                          type="radio"
+                          name="exam_start_flow"
+                          checked={examStartFlowDraft === 'dashboard_first'}
+                          onChange={() => setExamStartFlowDraft('dashboard_first')}
+                          className="w-4 h-4 accent-[#0a6b3c] cursor-pointer"
+                        />
+                        <span className="text-sm font-extrabold text-black">
+                          Option 1: Go to Dashboard First (Recommended)
+                        </span>
+                      </div>
+                    </div>
+                    <div className="pl-6 space-y-1">
+                      <div className="text-xs font-extrabold text-[#0a6b3c]">
+                        Students go to dashboard first before exam
+                      </div>
+                      <p className="text-xs text-neutral-600 leading-relaxed">
+                        After password correct, show candidate portal with name, course, selected subjects, category, exam center, instructions, then &quot;Start Exam Now&quot; button.
+                      </p>
+                    </div>
+                  </div>
+                  <div className="pl-6 flex items-center justify-between pt-2 border-t border-neutral-200/80">
+                    <span className="font-mono text-[10px] font-bold text-neutral-500">
+                      Route: /candidate/[id]/portal
+                    </span>
+                    <span className="px-2 py-0.5 rounded bg-[#0a6b3c] text-white font-mono text-[10px] font-extrabold">
+                      dashboard_first
+                    </span>
+                  </div>
+                </label>
+
+                {/* Option 2: Start Exam Immediately */}
+                <label
+                  onClick={() => setExamStartFlowDraft('immediate')}
+                  className={`p-4 rounded-2xl border-2 cursor-pointer transition-all flex flex-col justify-between gap-3 ${
+                    examStartFlowDraft === 'immediate'
+                      ? 'border-[#0a6b3c] bg-[#0a6b3c]/8 shadow-xs'
+                      : 'border-neutral-200 bg-neutral-50 hover:border-neutral-300'
+                  }`}
+                >
+                  <div className="space-y-2">
+                    <div className="flex items-start justify-between gap-2">
+                      <div className="flex items-center gap-2.5">
+                        <input
+                          type="radio"
+                          name="exam_start_flow"
+                          checked={examStartFlowDraft === 'immediate'}
+                          onChange={() => setExamStartFlowDraft('immediate')}
+                          className="w-4 h-4 accent-[#0a6b3c] cursor-pointer"
+                        />
+                        <span className="text-sm font-extrabold text-black">
+                          Option 2: Start Exam Immediately
+                        </span>
+                      </div>
+                    </div>
+                    <div className="pl-6 space-y-1">
+                      <div className="text-xs font-extrabold text-[#0a6b3c]">
+                        Students start exam immediately
+                      </div>
+                      <p className="text-xs text-neutral-600 leading-relaxed">
+                        After password correct, skip dashboard and start exam directly.
+                      </p>
+                    </div>
+                  </div>
+                  <div className="pl-6 flex items-center justify-between pt-2 border-t border-neutral-200/80">
+                    <span className="font-mono text-[10px] font-bold text-neutral-500">
+                      Route: /exam/[id]
+                    </span>
+                    <span className="px-2 py-0.5 rounded bg-neutral-800 text-white font-mono text-[10px] font-extrabold">
+                      immediate
+                    </span>
+                  </div>
+                </label>
+              </div>
+
+              <button
+                type="button"
+                onClick={handleSaveExamStartFlow}
+                className="w-full py-3.5 px-6 rounded-xl bg-[#0a6b3c] hover:bg-[#0e8a4e] text-white text-xs md:text-sm font-extrabold transition-colors cursor-pointer shadow-xs flex items-center justify-center gap-2"
+              >
+                <CheckCircle2 className="w-4 h-4" />
+                <span>Save Exam Start Behaviour</span>
+              </button>
+            </section>
+
+            {/* TASK 3: ADMIN > SETTINGS > DEFAULT CANDIDATE PASSWORD */}
+            <section className="p-6 md:p-7 rounded-3xl border-2 border-[#0a6b3c] bg-white text-black shadow-xs space-y-5">
+              <div className="space-y-1.5">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <div className="flex items-center gap-1.5 text-xs font-extrabold uppercase tracking-wider text-[#0a6b3c]">
+                    <KeyRound className="w-4 h-4" />
+                    <span>ADMIN &gt; SETTINGS &gt; DEFAULT CANDIDATE PASSWORD</span>
+                  </div>
+                  <span className="px-3 py-1 rounded-full bg-[#0a6b3c]/10 border border-[#0a6b3c]/30 text-[#0a6b3c] font-mono text-[10px] font-extrabold">
+                    system_settings: default_candidate_password
+                  </span>
+                </div>
+                <h2 className="text-lg font-extrabold text-black">
+                  Default Candidate Password (Master Password)
+                </h2>
+                <p className="text-xs text-neutral-500 leading-relaxed">
+                  Set ONE master password for ALL candidates. When a student clicks <strong>Start Exams</strong> and the <strong>Verify Identity</strong> modal appears, they can enter either their personal registration password or this Admin Default Master Password. Saved hashed in <code className="font-mono font-bold text-black">system_settings</code>.
+                </p>
+              </div>
+
+              <div className="space-y-3">
+                <label className="block text-xs font-extrabold text-neutral-800">
+                  Master Password for All Candidates
+                </label>
+                <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-3">
+                  <div className="relative flex-1">
+                    <input
+                      type={showDefaultCandidatePassword ? 'text' : 'password'}
+                      value={defaultCandidatePasswordDraft}
+                      onChange={(e) =>
+                        setDefaultCandidatePasswordDraft(e.target.value)
+                      }
+                      placeholder="Enter master password for all candidates..."
+                      className="w-full pl-4 pr-11 py-3 rounded-xl border border-neutral-300 focus:border-[#0a6b3c] focus:outline-none text-xs md:text-sm font-mono font-extrabold text-black bg-neutral-50"
+                    />
+                    <button
+                      type="button"
+                      onClick={() =>
+                        setShowDefaultCandidatePassword((prev) => !prev)
+                      }
+                      className="absolute right-3 top-1/2 -translate-y-1/2 p-1.5 rounded-lg text-neutral-500 hover:text-black cursor-pointer"
+                      title={
+                        showDefaultCandidatePassword
+                          ? 'Hide password'
+                          : 'Show password'
+                      }
+                    >
+                      {showDefaultCandidatePassword ? (
+                        <EyeOff className="w-4 h-4" />
+                      ) : (
+                        <Eye className="w-4 h-4" />
+                      )}
+                    </button>
+                  </div>
+
+                  <button
+                    type="button"
+                    onClick={handleSaveDefaultCandidatePassword}
+                    className="px-6 py-3 rounded-xl bg-[#0a6b3c] hover:bg-[#0e8a4e] text-white text-xs md:text-sm font-extrabold transition-colors cursor-pointer shadow-xs flex items-center justify-center gap-2 shrink-0"
+                  >
+                    <CheckCircle2 className="w-4 h-4" />
+                    <span>Save Default Password</span>
+                  </button>
+                </div>
+
+                <div className="p-3 rounded-xl bg-neutral-50 border border-neutral-200 flex flex-wrap items-center justify-between gap-2 text-[11px]">
+                  <span className="font-bold text-neutral-600">
+                    Stored SHA-256 Hash (<code className="font-mono text-[#0a6b3c]">default_candidate_password</code>):
+                  </span>
+                  <span className="font-mono text-neutral-800 truncate max-w-md">
+                    {settings.defaultCandidatePasswordHash ||
+                      simpleFallbackHash(
+                        settings.defaultCandidatePassword || 'quemint2026'
+                      )}
+                  </span>
                 </div>
               </div>
             </section>
@@ -5342,6 +6533,32 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
 
                         <button
                           type="button"
+                          onClick={() => handleTogglePublishRankingForTest(pt.id)}
+                          className={`px-3.5 py-2 rounded-xl text-xs font-extrabold flex items-center gap-1.5 cursor-pointer transition-colors ${
+                            Boolean(
+                              pt.rankingPublished ||
+                                (settings.rankingPublishedByTestId &&
+                                  settings.rankingPublishedByTestId[pt.id])
+                            )
+                              ? 'bg-[#0a6b3c] text-white hover:bg-[#0e8a4e]'
+                              : 'border-2 border-[#0a6b3c] bg-white text-[#0a6b3c] hover:bg-[#0a6b3c]/10'
+                          }`}
+                          title="When published, candidates see their Current Ranking on their result slip. When unpublished, Ranking completely disappears from candidate results."
+                        >
+                          <Trophy className="w-3.5 h-3.5" />
+                          <span>
+                            {Boolean(
+                              pt.rankingPublished ||
+                                (settings.rankingPublishedByTestId &&
+                                  settings.rankingPublishedByTestId[pt.id])
+                            )
+                              ? 'Unpublish Ranking'
+                              : 'Publish Ranking'}
+                          </span>
+                        </button>
+
+                        <button
+                          type="button"
                           onClick={() => {
                             const updated = (settings.publishedTests || []).map((t) =>
                               t.id === pt.id ? { ...t, published: !t.published } : t
@@ -5891,22 +7108,27 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                     <div className="text-xs md:text-sm font-extrabold text-black flex items-center gap-1.5">
                       <Video className="w-4 h-4 text-[#0a6b3c]" />
                       <span>
-                        Live Proctoring Master Toggle [ ON | OFF ] (settings.proctoringEnabled)
+                        Camera Access Required / Live Proctoring Master Toggle [ ON | OFF ]
                       </span>
                     </div>
                     <p className="text-[11px] text-neutral-500 leading-relaxed">
-                      When OFF, stops all candidate cameras immediately (socket.emit(&apos;proctoring-disabled&apos;)). When ON, requests 640x480 WebRTC streams.
+                      When ON, candidates must accept camera access (if a candidate clicks Deny, the camera prompt pops up again until they accept it). When OFF, camera access is not required and all candidate cameras stop immediately.
                     </p>
                   </div>
 
                   <button
                     type="button"
-                    onClick={() =>
+                    onClick={() => {
+                      const nextEnabled = !settings.proctoringEnabled;
                       onUpdateSettings({
                         ...settings,
-                        proctoringEnabled: !settings.proctoringEnabled,
-                      })
-                    }
+                        proctoringEnabled: nextEnabled,
+                        publishedTests: (settings.publishedTests || []).map((pt) => ({
+                          ...pt,
+                          requireCamera: nextEnabled,
+                        })),
+                      });
+                    }}
                     className={`w-12 h-7 rounded-full p-1 transition-colors cursor-pointer shrink-0 ${
                       settings.proctoringEnabled ? 'bg-[#0a6b3c]' : 'bg-neutral-300'
                     }`}
@@ -6336,9 +7558,18 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
         const matchedCombo = subjectCombinations.find(
           (sc) => sc.name.trim().toLowerCase() === liveCand.category.trim().toLowerCase()
         );
-        const comboSubjects = matchedCombo
-          ? matchedCombo.subjects
-          : ['English', 'Biology', 'Physics', 'Chemistry'];
+        const customSubjects = liveCand.subjectCombination
+          ? liveCand.subjectCombination
+              .split(',')
+              .map((s) => s.trim())
+              .filter(Boolean)
+          : [];
+        const comboSubjects =
+          customSubjects.length > 0
+            ? customSubjects
+            : matchedCombo
+            ? matchedCombo.subjects
+            : ['English', 'Mathematics', 'Biology', 'Chemistry'];
 
         return (
           <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/65 p-4 overflow-y-auto">
@@ -6445,15 +7676,47 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                           {liveCand.regNumber || 'Assigned on Approval'}
                         </span>
                       </div>
+                      {liveCand.email && (
+                        <div className="p-2.5 rounded-lg bg-white border border-neutral-200 flex items-center justify-between">
+                          <span className="text-neutral-500 font-bold">Email:</span>
+                          <span className="font-semibold text-black truncate max-w-[160px]">
+                            {liveCand.email}
+                          </span>
+                        </div>
+                      )}
+                      {liveCand.phone && (
+                        <div className="p-2.5 rounded-lg bg-white border border-neutral-200 flex items-center justify-between">
+                          <span className="text-neutral-500 font-bold">Phone:</span>
+                          <span className="font-mono font-semibold text-black">
+                            {liveCand.phone}
+                          </span>
+                        </div>
+                      )}
+                      {liveCand.stateOfOrigin && (
+                        <div className="p-2.5 rounded-lg bg-white border border-neutral-200 flex items-center justify-between">
+                          <span className="text-neutral-500 font-bold">State of Origin:</span>
+                          <span className="font-extrabold text-black">
+                            {liveCand.stateOfOrigin}
+                          </span>
+                        </div>
+                      )}
+                      {liveCand.courseOfStudy && (
+                        <div className="p-2.5 rounded-lg bg-white border border-neutral-200 flex items-center justify-between">
+                          <span className="text-neutral-500 font-bold">Course of Study:</span>
+                          <span className="font-extrabold text-[#0a6b3c]">
+                            {liveCand.courseOfStudy}
+                          </span>
+                        </div>
+                      )}
                     </div>
                   </div>
                 </div>
 
-                {/* 2. Subject Combination (Category) & Exam Schedule */}
+                {/* 2. Category, Flexible Subject Combination & Exam Center */}
                 <div className="p-4 rounded-xl bg-neutral-50 border border-neutral-200 space-y-3">
                   <div className="flex items-center justify-between border-b border-neutral-200 pb-1.5 gap-2">
                     <span className="text-[11px] font-extrabold uppercase tracking-wider text-[#0a6b3c]">
-                      2. Selected Subject Combination (Category) & Exam Subjects
+                      2. Category, Flexible 4-Subject Combination &amp; Exam Center
                     </span>
                     <select
                       value={
@@ -6467,7 +7730,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                         const newCat = e.target.value;
                         onUpdateCandidate({ ...liveCand, category: newCat });
                         triggerToast(
-                          `Updated ${liveCand.firstName} ${liveCand.surname}'s Subject Combination to "${newCat}".`
+                          `Updated ${liveCand.firstName} ${liveCand.surname}'s Category to "${newCat}".`
                         );
                       }}
                       className="px-2.5 py-1 rounded-full bg-[#0a6b3c] text-white text-[10px] font-extrabold uppercase cursor-pointer border border-[#0a6b3c] focus:outline-none"
@@ -6487,7 +7750,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                           value={combo.name}
                           className="bg-white text-black font-bold"
                         >
-                          {combo.name} ({combo.subjects.join(', ')})
+                          {combo.name}
                         </option>
                       ))}
                     </select>
@@ -6495,7 +7758,8 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
 
                   <div>
                     <span className="block text-[11px] text-neutral-600 font-semibold mb-1.5">
-                      Subjects Assigned under <strong>{liveCand.category}</strong>:
+                      Candidate&apos;s Registered Subject Combination (Category:{' '}
+                      <strong>{liveCand.category}</strong>):
                     </span>
                     <div className="flex flex-wrap gap-1.5">
                       {comboSubjects.map((subj) => (
@@ -6509,7 +7773,13 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                     </div>
                   </div>
 
-                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 pt-1">
+                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 pt-1">
+                    <div className="p-2.5 rounded-lg bg-white border border-neutral-200 flex items-center justify-between">
+                      <span className="text-neutral-500 font-bold">Examination Centre:</span>
+                      <span className="font-extrabold text-[#0a6b3c]">
+                        {liveCand.examCenterName || 'Main Hall'}
+                      </span>
+                    </div>
                     <div className="p-2.5 rounded-lg bg-white border border-neutral-200 flex items-center justify-between">
                       <span className="text-neutral-500 font-bold">Exam Date:</span>
                       <span className="font-bold text-black">{liveCand.examDate}</span>
@@ -6806,7 +8076,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
               </div>
               <div>
                 <label className="block font-bold mb-1">
-                  Subject Combination (Category)
+                  Category (Science, Art, Commercial)
                 </label>
                 <select
                   value={
@@ -6835,10 +8105,59 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                   )}
                   {subjectCombinations.map((combo) => (
                     <option key={combo.id} value={combo.name}>
-                      {combo.name} ({combo.subjects.join(', ')})
+                      {combo.name}
                     </option>
                   ))}
                 </select>
+              </div>
+              <div>
+                <label className="block font-bold mb-1">
+                  Subject Combination (Flexible 4 Subjects, comma-separated)
+                </label>
+                <input
+                  type="text"
+                  value={editCandidate.subjectCombination || ''}
+                  onChange={(e) =>
+                    setEditCandidate({
+                      ...editCandidate,
+                      subjectCombination: e.target.value,
+                    })
+                  }
+                  placeholder="English, Mathematics, Biology, Chemistry"
+                  className="w-full px-3 py-2 rounded border border-neutral-300"
+                />
+              </div>
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="block font-bold mb-1">Course of Study</label>
+                  <input
+                    type="text"
+                    value={editCandidate.courseOfStudy || ''}
+                    onChange={(e) =>
+                      setEditCandidate({
+                        ...editCandidate,
+                        courseOfStudy: e.target.value,
+                      })
+                    }
+                    placeholder="e.g., Medicine, Law"
+                    className="w-full px-3 py-2 rounded border border-neutral-300"
+                  />
+                </div>
+                <div>
+                  <label className="block font-bold mb-1">State of Origin</label>
+                  <input
+                    type="text"
+                    value={editCandidate.stateOfOrigin || ''}
+                    onChange={(e) =>
+                      setEditCandidate({
+                        ...editCandidate,
+                        stateOfOrigin: e.target.value,
+                      })
+                    }
+                    placeholder="e.g., Lagos, Rivers"
+                    className="w-full px-3 py-2 rounded border border-neutral-300"
+                  />
+                </div>
               </div>
             </div>
             <div className="flex justify-end gap-2 pt-2">
@@ -6885,11 +8204,12 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                 />
               </div>
               <div>
-                <label className="block font-bold mb-1">Middle Name</label>
+                <label className="block font-bold mb-1">Middle Name (Optional)</label>
                 <input
                   type="text"
                   value={newMiddleName}
                   onChange={(e) => setNewMiddleName(e.target.value)}
+                  placeholder="Leave empty or -"
                   className="w-full px-3 py-2 rounded border border-neutral-300"
                 />
               </div>
@@ -6901,6 +8221,40 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                   onChange={(e) => setNewSurname(e.target.value)}
                   className="w-full px-3 py-2 rounded border border-neutral-300"
                 />
+              </div>
+              <div>
+                <label className="block font-bold mb-1">
+                  Subject Combination (Free text, e.g., English, Maths, Biology, Chemistry)
+                </label>
+                <input
+                  type="text"
+                  value={newSubjectCombination}
+                  onChange={(e) => setNewSubjectCombination(e.target.value)}
+                  placeholder="English, Mathematics, Biology, Chemistry"
+                  className="w-full px-3 py-2 rounded border border-neutral-300"
+                />
+              </div>
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="block font-bold mb-1">Course of Study</label>
+                  <input
+                    type="text"
+                    value={newCourseOfStudy}
+                    onChange={(e) => setNewCourseOfStudy(e.target.value)}
+                    placeholder="e.g., Medicine, Law"
+                    className="w-full px-3 py-2 rounded border border-neutral-300"
+                  />
+                </div>
+                <div>
+                  <label className="block font-bold mb-1">State of Origin</label>
+                  <input
+                    type="text"
+                    value={newStateOfOrigin}
+                    onChange={(e) => setNewStateOfOrigin(e.target.value)}
+                    placeholder="e.g., Lagos"
+                    className="w-full px-3 py-2 rounded border border-neutral-300"
+                  />
+                </div>
               </div>
               <div className="grid grid-cols-2 gap-3">
                 <div>
@@ -6916,7 +8270,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                 </div>
                 <div>
                   <label className="block font-bold mb-1">
-                    Subject Combination (Category)
+                    Category (Science, Art, Commercial)
                   </label>
                   <select
                     value={newCategory}
@@ -6925,7 +8279,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                   >
                     {subjectCombinations.map((combo) => (
                       <option key={combo.id} value={combo.name}>
-                        {combo.name} ({combo.subjects.join(', ')})
+                        {combo.name}
                       </option>
                     ))}
                   </select>
@@ -6946,14 +8300,37 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                   if (!newFirstName.trim() || !newSurname.trim()) return;
                   const reg = `2027${String(15 + candidates.length).padStart(3, '0')}PHA`;
                   const pin = `QMT-${Math.floor(100000 + Math.random() * 900000)}`;
+                  const availableCenter = examCenters.find(
+                    (ec) => ec.currentCount < ec.maxCapacity
+                  );
+                  if (availableCenter) {
+                    const updatedCenters = examCenters.map((ec) =>
+                      ec.id === availableCenter.id
+                        ? { ...ec, currentCount: ec.currentCount + 1 }
+                        : ec
+                    );
+                    onUpdateSettings({
+                      ...settings,
+                      examCenters: updatedCenters,
+                    });
+                  }
+                  const cleanMid =
+                    newMiddleName.trim() === '-' ? '' : newMiddleName.trim();
                   onAddCandidatesBulk([
                     {
                       id: `cand-${Date.now()}`,
                       firstName: newFirstName.trim(),
-                      middleName: newMiddleName.trim(),
+                      middleName: cleanMid,
                       surname: newSurname.trim(),
                       gender: newGender,
                       category: newCategory,
+                      subjectCombination:
+                        newSubjectCombination.trim() ||
+                        'English, Mathematics, Biology, Chemistry',
+                      courseOfStudy: newCourseOfStudy.trim() || 'General Studies',
+                      stateOfOrigin: newStateOfOrigin.trim(),
+                      examCenterId: availableCenter?.id,
+                      examCenterName: availableCenter?.name || 'Main Hall',
                       regNumber: reg,
                       pin,
                       paymentStatus: 'Paid',
@@ -6970,11 +8347,13 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                   setNewFirstName('');
                   setNewMiddleName('');
                   setNewSurname('');
+                  setNewCourseOfStudy('');
+                  setNewStateOfOrigin('');
                   setShowAddCandidateModal(false);
                 }}
                 className="px-4 py-2 rounded-lg bg-[#0a6b3c] text-white text-xs font-bold cursor-pointer"
               >
-                  Add & Generate PIN
+                  Add &amp; Generate PIN
                 </button>
               </div>
             </div>
@@ -6986,13 +8365,19 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
         const matchedCand = candidates.find(
           (c) => c.regNumber.toUpperCase() === viewingResult.regNumber.toUpperCase()
         );
-        const candGender = viewingResult.gender || matchedCand?.gender || 'Female';
         const gradeInfo = getQuemintGradeInfo(viewingResult.percentage);
         const sortedAll = [...results].sort(
           (a, b) => b.score - a.score || b.percentage - a.percentage
         );
         const rIdx = sortedAll.findIndex((r) => r.id === viewingResult.id);
         const rankNum = rIdx !== -1 ? rIdx + 1 : 1;
+        const isRankPublishedForViewing = isExamRankingPublished(viewingResult, settings);
+        const dynamicSlipRows = resolveResultSlipFieldRows(
+          viewingResult,
+          matchedCand,
+          settings,
+          { rank: rankNum, total: Math.max(1, results.length) }
+        );
 
         return (
           <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/65 p-4 overflow-y-auto">
@@ -7026,40 +8411,31 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                     </span>
                   </h2>
                   <p className="text-xs text-neutral-500">
-                    {settings.resultTitles?.assessmentSubtitle || 'Quemint Assessment'} • Rank #{rankNum} of {Math.max(1, results.length)}
+                    {settings.resultTitles?.assessmentSubtitle || 'Quemint Assessment'}
+                    {isRankPublishedForViewing
+                      ? ` • Rank #${rankNum} of ${Math.max(1, results.length)}`
+                      : ''}
                   </p>
                 </div>
 
-                {/* Candidate Details */}
+                {/* Dynamic Candidate Details configured by Admin */}
                 <div className="space-y-2 text-xs pt-1">
-                  <div className="flex justify-between">
-                    <span className="text-neutral-500">Candidate Name:</span>
-                    <span className="font-bold text-neutral-900">
-                      {viewingResult.candidateName}
-                    </span>
-                  </div>
-                  <div className="flex justify-between">
-                    <span className="text-neutral-500">Category:</span>
-                    <span className="font-bold text-[#0a6b3c]">
-                      {viewingResult.category}
-                    </span>
-                  </div>
-                  <div className="flex justify-between">
-                    <span className="text-neutral-500">Registration Number:</span>
-                    <span className="font-mono font-bold text-neutral-900">
-                      {viewingResult.regNumber}
-                    </span>
-                  </div>
-                  <div className="flex justify-between">
-                    <span className="text-neutral-500">Gender:</span>
-                    <span className="font-bold text-neutral-900">{candGender}</span>
-                  </div>
-                  <div className="flex justify-between">
-                    <span className="text-neutral-500">Submitted At:</span>
-                    <span className="font-bold text-neutral-900">
-                      {new Date(viewingResult.submittedAt).toLocaleString()}
-                    </span>
-                  </div>
+                  {dynamicSlipRows.map((row) => (
+                    <div key={row.key} className="flex justify-between gap-3">
+                      <span className="text-neutral-500">{row.label}:</span>
+                      <span
+                        className={`font-bold text-right ${
+                          row.key === 'category' || row.key === 'currentRanking'
+                            ? 'text-[#0a6b3c]'
+                            : row.key === 'regNumber'
+                            ? 'font-mono text-neutral-900'
+                            : 'text-neutral-900'
+                        }`}
+                      >
+                        {row.value}
+                      </span>
+                    </div>
+                  ))}
                 </div>
 
                 <div className="border-t border-neutral-100" />

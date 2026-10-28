@@ -1,4 +1,5 @@
 import express from 'express';
+import crypto from 'crypto';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { createServer as createViteServer } from 'vite';
@@ -95,6 +96,173 @@ async function startServer() {
     notifications: null,
     updatedAt: 0,
   };
+
+  const sha256Hex = (str: string) =>
+    crypto.createHash('sha256').update(str.trim()).digest('hex');
+
+  // system_settings table representation (key: exam_start_flow, default_candidate_password)
+  const systemSettingsStore: Record<
+    string,
+    { id: string; key: string; value: string; created_at: string; updated_at: string }
+  > = {
+    exam_start_flow: {
+      id: 'sys-exam-start-flow',
+      key: 'exam_start_flow',
+      value: 'dashboard_first',
+      created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+    },
+    default_candidate_password: {
+      id: 'sys-default-cand-pwd',
+      key: 'default_candidate_password',
+      value: sha256Hex('quemint2026'),
+      created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+    },
+  };
+
+  app.get('/api/system-settings', (_req, res) => {
+    const flow =
+      sharedAppState.settings?.examStartFlow ||
+      systemSettingsStore.exam_start_flow?.value ||
+      'dashboard_first';
+    const defaultPwdHash =
+      sharedAppState.settings?.defaultCandidatePasswordHash ||
+      systemSettingsStore.default_candidate_password?.value ||
+      sha256Hex('quemint2026');
+
+    res.json({
+      status: true,
+      data: {
+        exam_start_flow: flow,
+        default_candidate_password: defaultPwdHash,
+        rows: Object.values(systemSettingsStore),
+      },
+    });
+  });
+
+  app.post('/api/system-settings', (req, res) => {
+    const { key, value, isPlainPassword } = req.body || {};
+    if (!key || typeof value !== 'string') {
+      res.status(400).json({ status: false, message: 'Key and value are required.' });
+      return;
+    }
+
+    const finalValue =
+      key === 'default_candidate_password' && isPlainPassword
+        ? sha256Hex(value)
+        : value.trim();
+
+    const nowIso = new Date().toISOString();
+    systemSettingsStore[key] = {
+      id: systemSettingsStore[key]?.id || `sys-${Date.now()}`,
+      key,
+      value: finalValue,
+      created_at: systemSettingsStore[key]?.created_at || nowIso,
+      updated_at: nowIso,
+    };
+
+    if (sharedAppState.settings && typeof sharedAppState.settings === 'object') {
+      if (key === 'exam_start_flow') {
+        sharedAppState.settings.examStartFlow = finalValue;
+      } else if (key === 'default_candidate_password') {
+        sharedAppState.settings.defaultCandidatePasswordHash = finalValue;
+        if (isPlainPassword) {
+          sharedAppState.settings.defaultCandidatePassword = value.trim();
+        }
+      }
+      sharedAppState.settings.systemSettings = {
+        ...(sharedAppState.settings.systemSettings || {}),
+        [key]: finalValue,
+      };
+      sharedAppState.updatedAt = Date.now();
+    }
+
+    res.json({
+      status: true,
+      setting: systemSettingsStore[key],
+      hashedValue: finalValue,
+    });
+  });
+
+  // Candidate Password Verification Endpoint (Checks student personal password_hash OR Admin Default Master Password)
+  app.post('/api/candidate/verify-password', (req, res) => {
+    const {
+      candidateId,
+      enteredPassword,
+      candidatePassword,
+      candidatePasswordHash,
+    } = req.body || {};
+
+    if (!enteredPassword || typeof enteredPassword !== 'string' || !enteredPassword.trim()) {
+      res.status(400).json({
+        status: false,
+        verified: false,
+        message: 'Incorrect password. Please try again or contact admin.',
+      });
+      return;
+    }
+
+    const cleanEntered = enteredPassword.trim();
+    const enteredHash = sha256Hex(cleanEntered);
+
+    // 1. Check student's personal password (from server candidates or request payload)
+    const serverCand = Array.isArray(sharedAppState.candidates)
+      ? sharedAppState.candidates.find((c: any) => c.id === candidateId)
+      : null;
+
+    const personalPlain = (serverCand?.password ?? candidatePassword ?? '').trim();
+    const personalHash = (serverCand?.passwordHash ?? candidatePasswordHash ?? '').trim();
+
+    const matchesPersonal =
+      (personalPlain !== '' &&
+        (personalPlain === cleanEntered || personalPlain === enteredHash)) ||
+      (personalHash !== '' &&
+        (personalHash === enteredHash || personalHash === cleanEntered));
+
+    // 2. Check Admin Default Master Password (system_settings.default_candidate_password)
+    const masterPlain = (
+      sharedAppState.settings?.defaultCandidatePassword ?? ''
+    ).trim();
+    const masterHash = (
+      sharedAppState.settings?.defaultCandidatePasswordHash ||
+      systemSettingsStore.default_candidate_password?.value ||
+      sha256Hex('quemint2026')
+    ).trim();
+
+    const matchesMaster =
+      (masterPlain !== '' &&
+        (masterPlain === cleanEntered || masterPlain === enteredHash)) ||
+      (masterHash !== '' &&
+        (masterHash === enteredHash || masterHash === cleanEntered));
+
+    if (!matchesPersonal && !matchesMaster) {
+      res.status(401).json({
+        status: false,
+        verified: false,
+        message: 'Incorrect password. Please try again or contact admin.',
+      });
+      return;
+    }
+
+    const examStartFlow =
+      sharedAppState.settings?.examStartFlow ||
+      systemSettingsStore.exam_start_flow?.value ||
+      'dashboard_first';
+
+    const redirectUrl =
+      examStartFlow === 'immediate'
+        ? `/exam/${candidateId}`
+        : `/candidate/${candidateId}/portal`;
+
+    res.json({
+      status: true,
+      verified: true,
+      matchedBy: matchesPersonal ? 'personal' : 'master',
+      examStartFlow,
+      redirectUrl,
+    });
+  });
 
   // Ephemeral In-Memory Live Proctoring Relay (Strictly Live Stream Only — No Recording Saved to Disk/DB)
   const proctoringClients = new Set<express.Response>();

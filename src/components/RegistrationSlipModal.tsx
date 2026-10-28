@@ -128,6 +128,38 @@ export const RegistrationSlipModal: React.FC<RegistrationSlipModalProps> = ({
                       {candidate.category.toUpperCase()}
                     </span>
                   </div>
+                  {candidate.courseOfStudy && (
+                    <div>
+                      <span className="block text-xs text-neutral-500">Course of Study</span>
+                      <span className="font-semibold text-sm text-black">
+                        {candidate.courseOfStudy}
+                      </span>
+                    </div>
+                  )}
+                  {candidate.stateOfOrigin && (
+                    <div>
+                      <span className="block text-xs text-neutral-500">State of Origin</span>
+                      <span className="font-semibold text-sm text-black">
+                        {candidate.stateOfOrigin}
+                      </span>
+                    </div>
+                  )}
+                  {candidate.examCenterName && (
+                    <div>
+                      <span className="block text-xs text-neutral-500">Examination Centre</span>
+                      <span className="font-bold text-sm text-[#0a6b3c]">
+                        {candidate.examCenterName}
+                      </span>
+                    </div>
+                  )}
+                  {candidate.subjectCombination && (
+                    <div className="sm:col-span-2">
+                      <span className="block text-xs text-neutral-500">Subject Combination</span>
+                      <span className="font-bold text-xs text-black">
+                        {candidate.subjectCombination}
+                      </span>
+                    </div>
+                  )}
                 </div>
               </div>
 

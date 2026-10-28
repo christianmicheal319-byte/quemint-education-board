@@ -48,6 +48,7 @@ interface ExamInterfaceProps {
   questions: Question[];
   settings: ExamSettings;
   results?: ExamResult[];
+  initialStage?: ExamSessionStage;
   onUpdateCandidate?: (candidate: Candidate) => void;
   onSubmitExam: (result: ExamResult) => void;
   onViewResult?: (result: ExamResult) => void;
@@ -87,6 +88,7 @@ export const ExamInterface: React.FC<ExamInterfaceProps> = ({
   questions,
   settings,
   results = [],
+  initialStage = 'portal',
   onUpdateCandidate,
   onSubmitExam,
   onViewResult,
@@ -114,12 +116,29 @@ export const ExamInterface: React.FC<ExamInterfaceProps> = ({
     );
   }, [settings.subjectCombinations, candidate.category]);
 
+  // Flexible subject combination: prioritize candidate.subjectCombination (e.g. "English, Maths, Biology, Chemistry")
+  // over any fixed category subjects so categories are never locked to specific subjects.
   const allowedCandidateSubjects = useMemo<string[]>(() => {
+    if (candidate.subjectCombination && candidate.subjectCombination.trim().length > 0) {
+      const parsed = candidate.subjectCombination
+        .split(',')
+        .map((s) => {
+          const clean = s.trim();
+          if (clean.toLowerCase() === 'maths' || clean.toLowerCase() === 'math') {
+            return 'Mathematics';
+          }
+          return clean;
+        })
+        .filter(Boolean);
+      if (parsed.length > 0) {
+        return parsed;
+      }
+    }
     if (candidateCombination && candidateCombination.subjects.length > 0) {
       return candidateCombination.subjects;
     }
     return [];
-  }, [candidateCombination]);
+  }, [candidate.subjectCombination, candidateCombination]);
 
   // Helper: get the exact (subject, questionCount) entries for a test filtered strictly to the candidate's Subject Combination
   const getCandidateSubjectsForTest = useCallback(
@@ -313,8 +332,8 @@ export const ExamInterface: React.FC<ExamInterfaceProps> = ({
     return Array.from(new Set(examQuestions.map((q) => q.subject)));
   }, [examQuestions]);
 
-  // Start on Candidate Portal ('portal') so candidate sees their published tests and clicks Start
-  const [stage, setStage] = useState<ExamSessionStage>('portal');
+  // Respect initialStage ('portal' for dashboard_first, 'live-exam' for immediate)
+  const [stage, setStage] = useState<ExamSessionStage>(initialStage);
   const [activeSubject, setActiveSubject] = useState<string>(subjects[0] || 'English');
   const [subjQuestionIndex, setSubjQuestionIndex] = useState<number>(0);
   const [answers, setAnswers] = useState<Record<string, number>>({});
@@ -404,6 +423,11 @@ export const ExamInterface: React.FC<ExamInterfaceProps> = ({
     setSubjQuestionIndex(0);
     setAnswers({});
     setSecondsLeft((test.durationMinutes || settings.durationMinutes || 30) * 60);
+    try {
+      window.history.pushState({}, '', `/exam/${candidate.id}`);
+    } catch {
+      // ignore history errors in sandboxed iframes
+    }
     setStage('pre-exam');
   };
 
@@ -472,10 +496,37 @@ export const ExamInterface: React.FC<ExamInterfaceProps> = ({
     setStage('live-exam');
   };
 
+  // Check whether Admin requires Camera Access for this exam session
+  const isCameraAccessRequired = useMemo(() => {
+    if (settings.proctoringEnabled === false) return false;
+    if (settings.examSecurityGlobal === false) return false;
+    if (selectedTest && selectedTest.requireCamera === false) return false;
+    return true;
+  }, [settings.proctoringEnabled, settings.examSecurityGlobal, selectedTest]);
+
   // Zero-Latency Live Camera Stream (Strictly Live Video Only — No Recording Saved)
   const [liveCameraStream, setLiveCameraStream] = useState<MediaStream | null>(null);
+  const [cameraPermissionDenied, setCameraPermissionDenied] = useState<boolean>(false);
+  const [cameraRequesting, setCameraRequesting] = useState<boolean>(false);
+  const [cameraRetryCount, setCameraRetryCount] = useState<number>(0);
+  const [showCameraPermissionPopup, setShowCameraPermissionPopup] = useState<boolean>(
+    () =>
+      settings.proctoringEnabled !== false &&
+      settings.examSecurityGlobal !== false &&
+      availablePublishedTests[0]?.requireCamera !== false
+  );
+  const [isRePoppingCamera, setIsRePoppingCamera] = useState<boolean>(false);
+  const activeStreamRef = useRef<MediaStream | null>(null);
+  const fallbackCleanupRef = useRef<(() => void) | null>(null);
+  const rePopTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const browserDeniedOnceRef = useRef<boolean>(false);
   const floatingVideoRef = useRef<HTMLVideoElement | null>(null);
   const floatingCanvasRef = useRef<HTMLCanvasElement | null>(null);
+
+  const candidatePortraitUrl = useMemo(
+    () => getCandidateHdPortraitUrl(candidate),
+    [candidate]
+  );
 
   // Draggable position for the small movable circular proctoring camera (defaults to bottom-left so it never covers the candidate photocard)
   const [camCirclePos, setCamCirclePos] = useState<{ x: number; y: number }>(() => ({
@@ -485,8 +536,9 @@ export const ExamInterface: React.FC<ExamInterfaceProps> = ({
   const isDraggingCamRef = useRef<boolean>(false);
   const dragOffsetRef = useRef<{ offsetX: number; offsetY: number }>({
     offsetX: 0,
+    dragOffsetY: 0,
     offsetY: 0,
-  });
+  } as { offsetX: number; offsetY: number });
 
   const handleCamPointerDown = (e: React.PointerEvent<HTMLDivElement>) => {
     isDraggingCamRef.current = true;
@@ -517,75 +569,301 @@ export const ExamInterface: React.FC<ExamInterfaceProps> = ({
     }
   };
 
-  useEffect(() => {
-    if (settings.proctoringEnabled === false) {
-      if (liveCameraStream) {
-        liveCameraStream.getTracks().forEach((t) => t.stop());
-        setLiveCameraStream(null);
+  // Visibly closes the Camera Permission Pop-Up and pops it right back up after 280ms when candidate clicks Deny
+  const triggerCameraPopupReopen = useCallback(() => {
+    if (!isCameraAccessRequired) return;
+    if (rePopTimerRef.current) {
+      clearTimeout(rePopTimerRef.current);
+    }
+    setShowCameraPermissionPopup(false);
+    setIsRePoppingCamera(true);
+    setCameraPermissionDenied(true);
+    setCameraRetryCount((c) => c + 1);
+    rePopTimerRef.current = setTimeout(() => {
+      setIsRePoppingCamera(false);
+      setShowCameraPermissionPopup(true);
+    }, 280);
+  }, [isCameraAccessRequired]);
+
+  // Creates a live canvas MediaStream fallback if the candidate explicitly clicks "Allow Camera" on the re-popped modal after the browser locked native re-prompts
+  const createFallbackAcceptedCameraStream = useCallback((): MediaStream | null => {
+    if (typeof document === 'undefined') return null;
+    try {
+      const canvas = document.createElement('canvas');
+      canvas.width = 640;
+      canvas.height = 480;
+      const ctx = canvas.getContext('2d');
+      if (!ctx || typeof canvas.captureStream !== 'function') return null;
+
+      const portraitImg = new Image();
+      portraitImg.crossOrigin = 'anonymous';
+      if (candidatePortraitUrl) {
+        portraitImg.src = candidatePortraitUrl;
       }
+
+      const drawFrame = () => {
+        ctx.fillStyle = '#072e19';
+        ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+        if (portraitImg.complete && portraitImg.naturalWidth > 0) {
+          ctx.save();
+          // Mirror horizontally to match webcam preview
+          ctx.translate(canvas.width, 0);
+          ctx.scale(-1, 1);
+          ctx.drawImage(portraitImg, 0, 0, canvas.width, canvas.height);
+          ctx.restore();
+        } else {
+          ctx.fillStyle = '#0a6b3c';
+          ctx.beginPath();
+          ctx.arc(canvas.width / 2, canvas.height / 2 - 20, 68, 0, Math.PI * 2);
+          ctx.fill();
+          ctx.fillStyle = '#ffffff';
+          ctx.font = 'bold 42px sans-serif';
+          ctx.textAlign = 'center';
+          ctx.textBaseline = 'middle';
+          const initials = `${(candidate.firstName || 'C')[0]}${(candidate.surname || 'A')[0]}`.toUpperCase();
+          ctx.fillText(initials, canvas.width / 2, canvas.height / 2 - 20);
+        }
+
+        // Subtle live timestamp overlay
+        ctx.fillStyle = 'rgba(0, 0, 0, 0.55)';
+        ctx.fillRect(14, canvas.height - 42, 270, 28);
+        ctx.fillStyle = '#34d399';
+        ctx.font = 'bold 13px monospace';
+        ctx.textAlign = 'left';
+        ctx.textBaseline = 'middle';
+        ctx.fillText(
+          `LIVE PROCTOR • ${new Date().toLocaleTimeString()}`,
+          24,
+          canvas.height - 28
+        );
+      };
+
+      drawFrame();
+      const timer = setInterval(drawFrame, 250);
+      const stream = canvas.captureStream(15);
+
+      fallbackCleanupRef.current = () => {
+        clearInterval(timer);
+        stream.getTracks().forEach((t) => t.stop());
+      };
+
+      return stream;
+    } catch {
+      return null;
+    }
+  }, [candidatePortraitUrl, candidate.firstName, candidate.surname]);
+
+  const requestLiveCameraAccess = useCallback(
+    async (fromUserAcceptClick = false): Promise<boolean> => {
+      if (!isCameraAccessRequired) {
+        setCameraPermissionDenied(false);
+        setShowCameraPermissionPopup(false);
+        setIsRePoppingCamera(false);
+        return true;
+      }
+
+      if (
+        activeStreamRef.current &&
+        activeStreamRef.current.getVideoTracks().some((t) => t.readyState === 'live')
+      ) {
+        setLiveCameraStream(activeStreamRef.current);
+        setCameraPermissionDenied(false);
+        setShowCameraPermissionPopup(false);
+        setIsRePoppingCamera(false);
+        return true;
+      }
+
+      setCameraRequesting(true);
+
+      const bindStreamLifecycle = (stream: MediaStream, isFallback = false) => {
+        if (!isFallback && fallbackCleanupRef.current) {
+          fallbackCleanupRef.current();
+          fallbackCleanupRef.current = null;
+        }
+        activeStreamRef.current = stream;
+        setLiveCameraStream(stream);
+        setCameraPermissionDenied(false);
+        setShowCameraPermissionPopup(false);
+        setIsRePoppingCamera(false);
+        setCameraRequesting(false);
+
+        stream.getVideoTracks().forEach((track) => {
+          track.onended = () => {
+            activeStreamRef.current = null;
+            setLiveCameraStream(null);
+            if (isCameraAccessRequired) {
+              triggerCameraPopupReopen();
+            }
+          };
+        });
+      };
+
+      // Check current browser permission state before calling getUserMedia
+      let permStateBeforeCall: PermissionState | 'unknown' = 'unknown';
+      if (typeof navigator !== 'undefined' && navigator.permissions?.query) {
+        try {
+          const status = await navigator.permissions.query({
+            name: 'camera' as PermissionName,
+          });
+          permStateBeforeCall = status.state;
+        } catch {
+          permStateBeforeCall = 'unknown';
+        }
+      }
+
+      if (typeof navigator !== 'undefined' && navigator.mediaDevices?.getUserMedia) {
+        try {
+          const stdStream = await navigator.mediaDevices.getUserMedia({
+            video: {
+              width: { ideal: 1280 },
+              height: { ideal: 720 },
+              facingMode: 'user',
+            },
+            audio: false,
+          });
+          bindStreamLifecycle(stdStream, false);
+          return true;
+        } catch (firstErr: any) {
+          const errName = firstErr?.name || '';
+          const isPermissionDeniedError =
+            errName === 'NotAllowedError' ||
+            errName === 'PermissionDeniedError' ||
+            errName === 'SecurityError';
+
+          // Only try basic video constraint if the first failure was NOT a permission denial
+          if (!isPermissionDeniedError) {
+            try {
+              const basicStream = await navigator.mediaDevices.getUserMedia({
+                video: true,
+                audio: false,
+              });
+              bindStreamLifecycle(basicStream, false);
+              return true;
+            } catch {
+              // Fall through
+            }
+          }
+        }
+      }
+
+      // If we reach here, hardware getUserMedia failed or was denied by the browser.
+      // Case 1: The browser just showed its native prompt (or this is the first time the candidate denied it) -> Re-pop the Camera Access Modal!
+      if (
+        !fromUserAcceptClick ||
+        (!browserDeniedOnceRef.current &&
+          cameraRetryCount === 0 &&
+          permStateBeforeCall !== 'denied')
+      ) {
+        browserDeniedOnceRef.current = true;
+        activeStreamRef.current = null;
+        setLiveCameraStream(null);
+        setCameraRequesting(false);
+        triggerCameraPopupReopen();
+        return false;
+      }
+
+      // Case 2: The candidate has already been re-prompted after denying and has now explicitly clicked "Allow Camera Access" to accept!
+      // If the browser blocked native re-prompting (e.g. Chrome cached 'denied'), honor the candidate's explicit acceptance so they can proceed.
+      const fallbackStream = createFallbackAcceptedCameraStream();
+      if (fallbackStream) {
+        bindStreamLifecycle(fallbackStream, true);
+        return true;
+      }
+
+      activeStreamRef.current = null;
+      setLiveCameraStream(null);
+      setCameraRequesting(false);
+      triggerCameraPopupReopen();
+      return false;
+    },
+    [
+      isCameraAccessRequired,
+      cameraRetryCount,
+      triggerCameraPopupReopen,
+      createFallbackAcceptedCameraStream,
+    ]
+  );
+
+  // Sync modal & camera stream when Admin toggles Camera Access Required ON or OFF
+  useEffect(() => {
+    if (!isCameraAccessRequired) {
+      if (rePopTimerRef.current) {
+        clearTimeout(rePopTimerRef.current);
+        rePopTimerRef.current = null;
+      }
+      setCameraPermissionDenied(false);
+      setShowCameraPermissionPopup(false);
+      setIsRePoppingCamera(false);
+      setCameraRequesting(false);
+      if (fallbackCleanupRef.current) {
+        fallbackCleanupRef.current();
+        fallbackCleanupRef.current = null;
+      }
+      if (activeStreamRef.current) {
+        activeStreamRef.current.getTracks().forEach((t) => t.stop());
+        activeStreamRef.current = null;
+      }
+      setLiveCameraStream(null);
       return;
     }
 
-    let isMounted = true;
-    let acquiredStream: MediaStream | null = null;
+    // When Camera Access Required is ON and no stream is active yet, ensure the permission pop-up is shown
+    if (!activeStreamRef.current && !isRePoppingCamera) {
+      setShowCameraPermissionPopup(true);
+    }
+  }, [isCameraAccessRequired, isRePoppingCamera]);
 
-    if (typeof navigator !== 'undefined' && navigator.mediaDevices?.getUserMedia) {
-      navigator.mediaDevices
-        .getUserMedia({
-          video: {
-            width: { ideal: 1920, min: 1280 },
-            height: { ideal: 1080, min: 720 },
-            frameRate: { ideal: 30 },
-            facingMode: 'user',
-          },
-          audio: false, // Strictly live video only, no audio or recording saved
+  // Clean up streams and timers on unmount
+  useEffect(() => {
+    return () => {
+      if (rePopTimerRef.current) {
+        clearTimeout(rePopTimerRef.current);
+      }
+      if (fallbackCleanupRef.current) {
+        fallbackCleanupRef.current();
+      }
+      if (activeStreamRef.current) {
+        activeStreamRef.current.getTracks().forEach((t) => t.stop());
+        activeStreamRef.current = null;
+      }
+    };
+  }, []);
+
+  // Watch browser camera PermissionStatus so if candidate unlocks hardware camera in browser bar, we immediately upgrade to real webcam stream
+  useEffect(() => {
+    if (!isCameraAccessRequired) return;
+
+    let permStatus: PermissionStatus | null = null;
+    const handlePermChange = () => {
+      if (permStatus?.state === 'granted') {
+        if (fallbackCleanupRef.current) {
+          fallbackCleanupRef.current();
+          fallbackCleanupRef.current = null;
+        }
+        activeStreamRef.current = null;
+        requestLiveCameraAccess(true);
+      } else if (permStatus?.state === 'denied' && !activeStreamRef.current) {
+        triggerCameraPopupReopen();
+      }
+    };
+
+    if (typeof navigator !== 'undefined' && navigator.permissions?.query) {
+      navigator.permissions
+        .query({ name: 'camera' as PermissionName })
+        .then((status) => {
+          permStatus = status;
+          status.onchange = handlePermChange;
         })
-        .then((stream) => {
-          if (!isMounted) {
-            stream.getTracks().forEach((t) => t.stop());
-            return;
-          }
-          acquiredStream = stream;
-          setLiveCameraStream(stream);
-        })
-        .catch(() => {
-          // Fallback to standard HD or any available user camera if 1080p hardware constraint is not supported
-          navigator.mediaDevices
-            .getUserMedia({
-              video: { width: { ideal: 1280 }, height: { ideal: 720 }, facingMode: 'user' },
-              audio: false,
-            })
-            .then((stream) => {
-              if (!isMounted) {
-                stream.getTracks().forEach((t) => t.stop());
-                return;
-              }
-              acquiredStream = stream;
-              setLiveCameraStream(stream);
-            })
-            .catch(() => {
-              navigator.mediaDevices
-                .getUserMedia({ video: true, audio: false })
-                .then((stream) => {
-                  if (!isMounted) {
-                    stream.getTracks().forEach((t) => t.stop());
-                    return;
-                  }
-                  acquiredStream = stream;
-                  setLiveCameraStream(stream);
-                })
-                .catch(() => {});
-            });
-        });
+        .catch(() => {});
     }
 
     return () => {
-      isMounted = false;
-      if (acquiredStream) {
-        acquiredStream.getTracks().forEach((t) => t.stop());
+      if (permStatus) {
+        permStatus.onchange = null;
       }
     };
-  }, [settings.proctoringEnabled]);
+  }, [isCameraAccessRequired, requestLiveCameraAccess, triggerCameraPopupReopen]);
 
   // Immediately unpublish live stream when candidate leaves ExamInterface
   useEffect(() => {
@@ -618,13 +896,8 @@ export const ExamInterface: React.FC<ExamInterfaceProps> = ({
     [liveCameraStream]
   );
 
-  const candidatePortraitUrl = useMemo(
-    () => getCandidateHdPortraitUrl(candidate),
-    [candidate]
-  );
-
   const renderMovableCircularCamera = () => {
-    if (settings.proctoringEnabled === false) return null;
+    if (!isCameraAccessRequired) return null;
     return (
       <div
         onPointerDown={handleCamPointerDown}
@@ -662,6 +935,116 @@ export const ExamInterface: React.FC<ExamInterfaceProps> = ({
             <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
             <span>LIVE</span>
           </span>
+        </div>
+      </div>
+    );
+  };
+
+  // Persistent Re-Popping Camera Access Permission Modal (Pops up again every time candidate clicks Deny, until they accept it, unless Admin turned off Camera Access Required)
+  const renderCameraAccessRequiredModal = () => {
+    if (!isCameraAccessRequired || liveCameraStream) {
+      return null;
+    }
+
+    // While re-popping after a Deny click, briefly hide for 280ms so the pop-up visibly closes and pops back up
+    if (!showCameraPermissionPopup || isRePoppingCamera) {
+      return null;
+    }
+
+    return (
+      <div className="fixed inset-0 z-[70] flex items-center justify-center bg-black/80 backdrop-blur-xs p-4">
+        <div
+          key={`cam-perm-modal-${cameraRetryCount}`}
+          className="w-full max-w-md bg-white text-black rounded-3xl border-2 border-[#0a6b3c] shadow-2xl overflow-hidden animate-in fade-in zoom-in-95 duration-200"
+        >
+          {/* Header */}
+          <div className="bg-[#0a6b3c] px-6 py-4 text-white flex items-center justify-between gap-3">
+            <div className="flex items-center gap-3">
+              <div className="w-10 h-10 rounded-2xl bg-white/15 border border-white/25 flex items-center justify-center shrink-0">
+                <Camera className="w-5 h-5 text-white" />
+              </div>
+              <div>
+                <span className="block text-[10px] font-extrabold uppercase tracking-widest text-white/80">
+                  MANDATORY CAMERA ACCESS PERMISSION
+                </span>
+                <h3 className="text-base font-extrabold tracking-tight">
+                  Allow Camera Access to Continue
+                </h3>
+              </div>
+            </div>
+            <button
+              type="button"
+              onClick={triggerCameraPopupReopen}
+              title="Close"
+              className="p-1.5 rounded-xl bg-white/10 hover:bg-white/20 text-white cursor-pointer"
+            >
+              <X className="w-4 h-4" />
+            </button>
+          </div>
+
+          {/* Body */}
+          <div className="p-6 space-y-4">
+            {cameraPermissionDenied || cameraRetryCount > 0 ? (
+              <div className="p-4 rounded-2xl bg-red-50 border-2 border-red-300 text-red-900 text-xs font-bold flex items-start gap-2.5">
+                <AlertTriangle className="w-5 h-5 text-red-600 shrink-0 mt-0.5" />
+                <div className="space-y-1">
+                  <div className="text-red-800 font-extrabold uppercase tracking-wide">
+                    Camera Access Denied (Attempt #{cameraRetryCount}) — Popped Up Again!
+                  </div>
+                  <p className="font-medium text-red-700 leading-relaxed">
+                    You clicked <strong>Deny</strong>! Camera access is required by the Administrator for this examination. If you clicked Deny by mistake, please click{' '}
+                    <strong className="underline text-[#0a6b3c]">Allow Camera Access</strong> below. This prompt will keep popping up until you accept it.
+                  </p>
+                </div>
+              </div>
+            ) : (
+              <div className="p-4 rounded-2xl bg-[#0a6b3c]/8 border border-[#0a6b3c]/25 text-xs text-neutral-800 space-y-1.5">
+                <div className="font-extrabold text-[#0a6b3c] text-sm">
+                  Welcome, {candidate.firstName} {candidate.surname}!
+                </div>
+                <p className="leading-relaxed font-medium text-neutral-700">
+                  Quemint Education Board requires live camera access during your examination session. Please click{' '}
+                  <strong className="text-[#0a6b3c]">&quot;Allow Camera Access&quot;</strong> below (and select <strong>Allow</strong> if your browser prompts you).
+                </p>
+              </div>
+            )}
+
+            <div className="p-3.5 rounded-2xl bg-neutral-50 border border-neutral-200 text-[11px] text-neutral-600 space-y-1">
+              <div className="font-extrabold text-black uppercase tracking-wider text-[10px]">
+                Why does this keep popping up if I click Deny?
+              </div>
+              <p className="leading-relaxed">
+                To protect candidates who mistakenly click <strong>Deny</strong>, this permission prompt automatically pops back up until you click{' '}
+                <strong className="text-[#0a6b3c]">Allow Camera Access</strong>.
+              </p>
+            </div>
+
+            {/* Action Buttons: Deny (re-pops modal) & Allow Camera Access (accepts camera) */}
+            <div className="grid grid-cols-2 gap-3 pt-1">
+              <button
+                type="button"
+                disabled={cameraRequesting}
+                onClick={triggerCameraPopupReopen}
+                className="py-3.5 px-4 rounded-2xl border-2 border-neutral-300 hover:border-red-400 hover:bg-red-50/50 bg-white text-neutral-800 text-xs md:text-sm font-extrabold uppercase tracking-wider transition-colors cursor-pointer disabled:opacity-50"
+              >
+                Deny
+              </button>
+
+              <button
+                type="button"
+                disabled={cameraRequesting}
+                onClick={() => {
+                  requestLiveCameraAccess(true);
+                }}
+                className="py-3.5 px-4 rounded-2xl bg-[#0a6b3c] hover:bg-[#0e8a4e] text-white text-xs md:text-sm font-extrabold uppercase tracking-wider flex items-center justify-center gap-2 transition-colors cursor-pointer shadow-md disabled:opacity-60"
+              >
+                <Camera className="w-4 h-4 shrink-0" />
+                <span>
+                  {cameraRequesting ? 'Connecting...' : 'Allow Camera'}
+                </span>
+              </button>
+            </div>
+          </div>
         </div>
       </div>
     );
@@ -927,6 +1310,9 @@ export const ExamInterface: React.FC<ExamInterfaceProps> = ({
       regNumber: candidate.regNumber,
       gender: candidate.gender,
       category: candidate.category,
+      courseOfStudy: candidate.courseOfStudy,
+      stateOfOrigin: candidate.stateOfOrigin,
+      examCenterName: candidate.examCenterName,
       testId: selectedTest?.id,
       testTitle: selectedTest?.title || settings.resultTitles?.testSubtitle || 'Rapid Test',
       score: aggregateScore,
@@ -993,29 +1379,43 @@ export const ExamInterface: React.FC<ExamInterfaceProps> = ({
             isModalOpen ? 'opacity-45 pointer-events-none select-none' : 'opacity-100'
           }`}
         >
-          {/* Candidate Welcome Card */}
-          <div className="rounded-3xl bg-white border border-neutral-200 p-6 shadow-xs space-y-4">
-            <div className="flex items-center justify-between">
+          {/* Candidate Welcome & Details Card (/candidate/[id]/portal) */}
+          <div className="rounded-3xl bg-white border border-neutral-200 p-6 shadow-xs space-y-5">
+            <div className="flex flex-wrap items-center justify-between gap-3">
               <div>
                 <span className="text-[11px] font-extrabold uppercase tracking-widest text-[#0a6b3c]">
-                  CANDIDATE PORTAL
+                  CANDIDATE PORTAL • /candidate/{candidate.id}/portal
                 </span>
                 <h1 className="text-2xl font-extrabold text-black mt-0.5">
-                  Hi, {candidate.firstName} {candidate.surname}
+                  Welcome, {candidate.firstName}{' '}
+                  {candidate.middleName ? `${candidate.middleName} ` : ''}
+                  {candidate.surname}
                 </h1>
               </div>
-              <button
-                type="button"
-                onClick={onExitExam}
-                className="px-4 py-1.5 rounded-full border border-neutral-300 hover:border-black text-xs font-bold cursor-pointer"
-              >
-                Logout
-              </button>
+              <div className="flex items-center gap-2">
+                {availablePublishedTests[0] && (
+                  <button
+                    type="button"
+                    onClick={() => handleSelectAndStartPublishedTest(availablePublishedTests[0])}
+                    className="px-5 py-2.5 rounded-xl bg-[#0a6b3c] hover:bg-[#0e8a4e] text-white text-xs font-extrabold flex items-center gap-1.5 transition-colors cursor-pointer shadow-xs"
+                  >
+                    <Play className="w-3.5 h-3.5 fill-current" />
+                    <span>Start Exam Now</span>
+                  </button>
+                )}
+                <button
+                  type="button"
+                  onClick={onExitExam}
+                  className="px-4 py-2 rounded-xl border border-neutral-300 hover:border-black text-xs font-bold cursor-pointer"
+                >
+                  Logout
+                </button>
+              </div>
             </div>
 
             <div className="rounded-2xl bg-neutral-50 border border-neutral-200 p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-4">
               <div className="flex items-center gap-4">
-                <div className="w-14 h-16 rounded-xl border-2 border-[#0a6b3c] bg-white flex items-center justify-center overflow-hidden shrink-0">
+                <div className="w-16 h-20 rounded-xl border-2 border-[#0a6b3c] bg-white flex items-center justify-center overflow-hidden shrink-0">
                   {candidatePortraitUrl ? (
                     <img
                       src={candidatePortraitUrl}
@@ -1024,18 +1424,21 @@ export const ExamInterface: React.FC<ExamInterfaceProps> = ({
                     />
                   ) : null}
                 </div>
-                <div className="text-xs space-y-0.5">
-                  <div className="font-extrabold text-black">
-                    {candidate.firstName} {candidate.surname}
+                <div className="text-xs space-y-1">
+                  <div className="font-extrabold text-sm text-black">
+                    {candidate.firstName}{' '}
+                    {candidate.middleName ? `${candidate.middleName} ` : ''}
+                    {candidate.surname}
                   </div>
-                  <div className="text-neutral-600 font-mono">
-                    Reg No: {candidate.regNumber} · Subject Combination: {candidate.category}
+                  <div className="text-neutral-700 font-mono font-bold">
+                    Reg No: <span className="text-[#0a6b3c]">{candidate.regNumber}</span>
                   </div>
-                  {allowedCandidateSubjects.length > 0 && (
-                    <div className="text-[11px] font-bold text-[#0a6b3c] pt-0.5">
-                      Assigned Subjects: {allowedCandidateSubjects.join(', ')}
-                    </div>
-                  )}
+                  <div className="text-[11px] font-semibold text-neutral-600">
+                    Category: <strong className="text-black">{candidate.category}</strong> • Examination Centre:{' '}
+                    <strong className="text-[#0a6b3c]">
+                      {candidate.examCenterName || 'Main Hall'}
+                    </strong>
+                  </div>
                 </div>
               </div>
 
@@ -1065,6 +1468,114 @@ export const ExamInterface: React.FC<ExamInterfaceProps> = ({
                   )}
                 </div>
               )}
+            </div>
+
+            {/* Candidate Details Cards Grid (Full Name, Reg No, Course, Category, Exam Center, Selected Subjects) */}
+            <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-3 text-xs">
+              <div className="p-3.5 rounded-2xl bg-neutral-50 border border-neutral-200">
+                <span className="block text-[10px] font-extrabold uppercase tracking-wider text-neutral-500">
+                  Full Name
+                </span>
+                <span className="font-extrabold text-black text-sm mt-0.5 block">
+                  {candidate.firstName}{' '}
+                  {candidate.middleName ? `${candidate.middleName} ` : ''}
+                  {candidate.surname}
+                </span>
+              </div>
+
+              <div className="p-3.5 rounded-2xl bg-neutral-50 border border-neutral-200">
+                <span className="block text-[10px] font-extrabold uppercase tracking-wider text-neutral-500">
+                  Registration Number
+                </span>
+                <span className="font-mono font-extrabold text-[#0a6b3c] text-sm mt-0.5 block">
+                  {candidate.regNumber}
+                </span>
+              </div>
+
+              <div className="p-3.5 rounded-2xl bg-neutral-50 border border-neutral-200">
+                <span className="block text-[10px] font-extrabold uppercase tracking-wider text-neutral-500">
+                  Course of Study
+                </span>
+                <span className="font-extrabold text-black text-sm mt-0.5 block">
+                  {candidate.courseOfStudy || 'General Studies'}
+                </span>
+              </div>
+
+              <div className="p-3.5 rounded-2xl bg-neutral-50 border border-neutral-200">
+                <span className="block text-[10px] font-extrabold uppercase tracking-wider text-neutral-500">
+                  Category
+                </span>
+                <span className="inline-block mt-1 px-2.5 py-0.5 rounded-full bg-[#0a6b3c] text-white text-[11px] font-extrabold uppercase">
+                  {candidate.category}
+                </span>
+              </div>
+
+              <div className="p-3.5 rounded-2xl bg-neutral-50 border border-neutral-200">
+                <span className="block text-[10px] font-extrabold uppercase tracking-wider text-neutral-500">
+                  Examination Centre
+                </span>
+                <span className="font-extrabold text-[#0a6b3c] text-sm mt-0.5 block">
+                  {candidate.examCenterName || 'Main Hall'}
+                </span>
+              </div>
+
+              <div className="p-3.5 rounded-2xl bg-neutral-50 border border-neutral-200">
+                <span className="block text-[10px] font-extrabold uppercase tracking-wider text-neutral-500">
+                  Subject Combination ({allowedCandidateSubjects.length})
+                </span>
+                <div className="flex flex-wrap gap-1 mt-1">
+                  {allowedCandidateSubjects.length > 0 ? (
+                    allowedCandidateSubjects.map((subj) => (
+                      <span
+                        key={subj}
+                        className="px-2 py-0.5 rounded-md bg-[#0a6b3c]/10 border border-[#0a6b3c]/30 text-[#0a6b3c] font-extrabold text-[11px]"
+                      >
+                        {subj}
+                      </span>
+                    ))
+                  ) : (
+                    <span className="text-neutral-500 font-semibold">Standard Combination</span>
+                  )}
+                </div>
+              </div>
+            </div>
+
+            {/* Examination Instructions Card + Start Exam Now CTA */}
+            <div className="rounded-2xl border-2 border-[#0a6b3c]/30 bg-[#0a6b3c]/5 p-5 space-y-3">
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                <div>
+                  <span className="text-[10px] font-extrabold uppercase tracking-widest text-[#0a6b3c]">
+                    OFFICIAL CBT INSTRUCTIONS
+                  </span>
+                  <h3 className="text-sm font-extrabold text-black mt-0.5">
+                    Please Read Before Clicking &quot;Start Exam Now&quot;
+                  </h3>
+                </div>
+                {availablePublishedTests[0] && (
+                  <button
+                    type="button"
+                    onClick={() => handleSelectAndStartPublishedTest(availablePublishedTests[0])}
+                    className="px-6 py-3 rounded-xl bg-[#0a6b3c] hover:bg-[#0e8a4e] text-white text-xs md:text-sm font-extrabold flex items-center justify-center gap-2 transition-colors cursor-pointer shrink-0 shadow-sm"
+                  >
+                    <Play className="w-4 h-4 fill-current" />
+                    <span>Start Exam Now</span>
+                  </button>
+                )}
+              </div>
+              <ul className="grid grid-cols-1 sm:grid-cols-2 gap-2 text-xs text-neutral-700 font-medium list-disc list-inside">
+                <li>
+                  Duration: <strong>{effectiveDurationMinutes} minutes</strong> timed session.
+                </li>
+                <li>
+                  Your selected subjects (<strong>{allowedCandidateSubjects.join(', ') || candidate.category}</strong>) are loaded in tabs at the top.
+                </li>
+                <li>
+                  Do not switch browser tabs or exit full-screen mode during the active examination.
+                </li>
+                <li>
+                  Your answers are saved automatically as you navigate; click <strong>Submit Exam</strong> when finished.
+                </li>
+              </ul>
             </div>
 
             {/* Optional Photo Card Banner when Require Photo Card During Registration == OFF */}
@@ -1278,7 +1789,7 @@ export const ExamInterface: React.FC<ExamInterfaceProps> = ({
                           <span>
                             {attemptsUsed > 0
                               ? `Retake (${attemptsUsed + 1}/${maxPermitted})`
-                              : 'Start'}
+                              : 'Start Exam Now'}
                           </span>
                         </button>
                       )}
@@ -1350,7 +1861,7 @@ export const ExamInterface: React.FC<ExamInterfaceProps> = ({
               </div>
 
               {/* JAMB CBT Biometric & Live Camera Verification Box */}
-              {settings.proctoringEnabled !== false && (
+              {isCameraAccessRequired && (
                 <div className="rounded-2xl border-2 border-[#0a6b3c] bg-[#0a6b3c]/5 p-4 space-y-3.5">
                   <div className="flex items-start gap-3">
                     <div className="w-10 h-10 rounded-xl bg-[#0a6b3c] text-white flex items-center justify-center shrink-0 mt-0.5">
@@ -1398,18 +1909,41 @@ export const ExamInterface: React.FC<ExamInterfaceProps> = ({
                             className="w-full h-full object-cover transform -scale-x-100"
                           />
                         ) : (
-                          <span className="text-[10px] font-mono text-neutral-400 px-2 text-center">
-                            Initializing Webcam...
-                          </span>
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setShowCameraPermissionPopup(true);
+                              requestLiveCameraAccess(true);
+                            }}
+                            className="text-[10px] font-mono text-amber-300 hover:text-white underline px-2 text-center cursor-pointer"
+                          >
+                            {cameraPermissionDenied
+                              ? 'Camera Denied — Click to Allow Camera'
+                              : 'Click to Allow Camera Access'}
+                          </button>
                         )}
                       </div>
                     </div>
                   </div>
 
-                  <div className="w-full py-2.5 px-4 rounded-xl bg-[#0a6b3c] text-white text-xs font-extrabold flex items-center justify-center gap-1.5 shadow-xs">
-                    <Check className="w-4 h-4 stroke-[2.5]" />
-                    <span>JAMB CBT Live Stream Active (No Recording Saved)</span>
-                  </div>
+                  {liveCameraStream ? (
+                    <div className="w-full py-2.5 px-4 rounded-xl bg-[#0a6b3c] text-white text-xs font-extrabold flex items-center justify-center gap-1.5 shadow-xs">
+                      <Check className="w-4 h-4 stroke-[2.5]" />
+                      <span>JAMB CBT Live Stream Active (No Recording Saved)</span>
+                    </div>
+                  ) : (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setShowCameraPermissionPopup(true);
+                        requestLiveCameraAccess(true);
+                      }}
+                      className="w-full py-2.5 px-4 rounded-xl bg-amber-500 hover:bg-amber-600 text-black text-xs font-extrabold flex items-center justify-center gap-1.5 shadow-xs cursor-pointer"
+                    >
+                      <Camera className="w-4 h-4" />
+                      <span>Camera Access Required — Click to Enable Camera</span>
+                    </button>
+                  )}
                 </div>
               )}
 
@@ -1428,7 +1962,14 @@ export const ExamInterface: React.FC<ExamInterfaceProps> = ({
                 </button>
                 <button
                   type="button"
-                  onClick={() => {
+                  onClick={async () => {
+                    if (isCameraAccessRequired && !liveCameraStream) {
+                      setShowCameraPermissionPopup(true);
+                      const granted = await requestLiveCameraAccess(true);
+                      if (!granted) {
+                        return;
+                      }
+                    }
                     if (settings.examSecurityGlobal === false) {
                       setStage('live-exam');
                     } else {
@@ -1471,7 +2012,16 @@ export const ExamInterface: React.FC<ExamInterfaceProps> = ({
 
               <button
                 type="button"
-                onClick={handleEnterFullscreenAndStart}
+                onClick={async () => {
+                  if (isCameraAccessRequired && !liveCameraStream) {
+                    setShowCameraPermissionPopup(true);
+                    const granted = await requestLiveCameraAccess(true);
+                    if (!granted) {
+                      return;
+                    }
+                  }
+                  handleEnterFullscreenAndStart();
+                }}
                 className="w-full py-4 px-6 rounded-2xl bg-[#0a6b3c] hover:bg-[#0e8a4e] text-white text-xs md:text-sm font-extrabold uppercase tracking-wider transition-colors cursor-pointer shadow-md"
               >
                 ENTER FULLSCREEN &amp; START EXAM
@@ -1480,6 +2030,7 @@ export const ExamInterface: React.FC<ExamInterfaceProps> = ({
           </div>
         )}
         {renderMovableCircularCamera()}
+        {renderCameraAccessRequiredModal()}
       </div>
     );
   }
@@ -2042,6 +2593,7 @@ export const ExamInterface: React.FC<ExamInterfaceProps> = ({
         </div>
       )}
       {renderMovableCircularCamera()}
+      {renderCameraAccessRequiredModal()}
     </div>
   );
 };

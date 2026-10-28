@@ -1,6 +1,13 @@
 import { jsPDF } from 'jspdf';
 import autoTable from 'jspdf-autotable';
-import { Candidate, ExamResult, ExamSettings, Question } from '../types';
+import {
+  Candidate,
+  ExamResult,
+  ExamSettings,
+  Question,
+  ResultSlipFieldConfig,
+} from '../types';
+import { DEFAULT_RESULT_SLIP_FIELDS } from '../data/initialData';
 
 import { QUEMINT_LOGO_URL } from '../components/QuemintSeal';
 
@@ -289,6 +296,179 @@ export function formatExamDateTime(isoStr: string): string {
 }
 
 /**
+ * Checks whether the Admin has clicked "Publish Ranking" for the specific exam of this result.
+ * If false, the candidate's ranking is completely hidden and the word "Ranking" never appears on the result slip.
+ */
+export function isExamRankingPublished(
+  res: ExamResult,
+  settings: ExamSettings
+): boolean {
+  const publishedTests = settings.publishedTests || [];
+  const matchedTest =
+    publishedTests.find(
+      (pt) =>
+        (res.testId && pt.id === res.testId) ||
+        (res.testTitle &&
+          pt.title.trim().toLowerCase() === res.testTitle.trim().toLowerCase())
+    ) || (publishedTests.length === 1 ? publishedTests[0] : undefined);
+
+  if (matchedTest) {
+    if (typeof matchedTest.rankingPublished === 'boolean') {
+      return matchedTest.rankingPublished;
+    }
+    if (
+      settings.rankingPublishedByTestId &&
+      typeof settings.rankingPublishedByTestId[matchedTest.id] === 'boolean'
+    ) {
+      return settings.rankingPublishedByTestId[matchedTest.id];
+    }
+  }
+
+  if (
+    res.testId &&
+    settings.rankingPublishedByTestId &&
+    typeof settings.rankingPublishedByTestId[res.testId] === 'boolean'
+  ) {
+    return settings.rankingPublishedByTestId[res.testId];
+  }
+
+  return Boolean(settings.globalRankingPublished);
+}
+
+/**
+ * Returns the effective dynamic Result Slip fields list, ensuring new default fields
+ * (Examination Centre, Course, State of Origin, Current Ranking) are present even on older saved settings.
+ */
+export function getEffectiveResultSlipFields(
+  settings: ExamSettings
+): ResultSlipFieldConfig[] {
+  const saved = settings.resultSlipFields;
+  if (!saved || !Array.isArray(saved) || saved.length === 0) {
+    return DEFAULT_RESULT_SLIP_FIELDS;
+  }
+
+  // Ensure default required keys exist in saved array (so existing localStorage gets the new defaults)
+  const existingKeys = new Set(saved.map((f) => f.key));
+  const merged = saved.map((f) =>
+    f.key === 'examinationCentre' || f.key === 'examCenter'
+      ? { ...f, key: 'examinationCentre', label: f.label.replace(/Exam Center|Q-Zone/gi, 'Examination Centre') || 'Examination Centre' }
+      : f
+  );
+
+  DEFAULT_RESULT_SLIP_FIELDS.forEach((defField) => {
+    if (!existingKeys.has(defField.key)) {
+      merged.push({ ...defField });
+    }
+  });
+
+  return merged;
+}
+
+/**
+ * Resolves the enabled dynamic Candidate Details rows to display on the Result Slip (UI & PDF).
+ * Strictly omits 'currentRanking' unless isExamRankingPublished(res, settings) is true!
+ */
+export function resolveResultSlipFieldRows(
+  res: ExamResult,
+  candidate: Candidate | undefined,
+  settings: ExamSettings,
+  rankInfo?: { rank: number; total: number }
+): { key: string; label: string; value: string }[] {
+  const fields = getEffectiveResultSlipFields(settings);
+  const rankingPublished = isExamRankingPublished(res, settings);
+  const rows: { key: string; label: string; value: string }[] = [];
+
+  fields.forEach((field) => {
+    if (!field.enabled) return;
+
+    // STRICT RULE: Only show Current Ranking when Admin has clicked "Publish Ranking" on that exam
+    if (field.key === 'currentRanking') {
+      if (!rankingPublished) return;
+      const rankValue = rankInfo
+        ? `#${rankInfo.rank} of ${rankInfo.total}`
+        : '#1';
+      rows.push({
+        key: field.key,
+        label: field.label || 'Current Ranking',
+        value: rankValue,
+      });
+      return;
+    }
+
+    let val = '';
+    switch (field.key) {
+      case 'candidateName':
+        val =
+          res.candidateName ||
+          (candidate
+            ? `${candidate.firstName} ${candidate.middleName ? `${candidate.middleName} ` : ''}${candidate.surname}`.trim()
+            : '—');
+        break;
+      case 'regNumber':
+        val = res.regNumber || candidate?.regNumber || '—';
+        break;
+      case 'category':
+        val = res.category || candidate?.category || 'Science';
+        break;
+      case 'gender':
+        val = res.gender || candidate?.gender || 'Female';
+        break;
+      case 'examinationCentre':
+        val =
+          res.examCenterName ||
+          candidate?.examCenterName ||
+          'Main Hall';
+        break;
+      case 'courseOfStudy':
+        val =
+          res.courseOfStudy ||
+          candidate?.courseOfStudy ||
+          'General Studies';
+        break;
+      case 'stateOfOrigin':
+        val =
+          res.stateOfOrigin ||
+          candidate?.stateOfOrigin ||
+          '—';
+        break;
+      case 'examDateTime':
+        val = formatExamDateTime(res.submittedAt);
+        break;
+      case 'subjectCombination':
+        val =
+          candidate?.subjectCombination ||
+          Object.keys(res.subjectBreakdown || {}).join(', ') ||
+          '—';
+        break;
+      case 'email':
+        val = candidate?.email || '—';
+        break;
+      case 'phone':
+        val = candidate?.phone || '—';
+        break;
+      default: {
+        const dynamicCandVal = candidate
+          ? (candidate as unknown as Record<string, unknown>)[field.key]
+          : undefined;
+        val =
+          (typeof dynamicCandVal === 'string' && dynamicCandVal.trim()
+            ? dynamicCandVal
+            : field.customValue) || '—';
+        break;
+      }
+    }
+
+    rows.push({
+      key: field.key,
+      label: field.label,
+      value: val,
+    });
+  });
+
+  return rows;
+}
+
+/**
  * Generates and downloads the Candidate Result Slip PDF matching the exact layout of the
  * reference screenshot (Result_Slip_<RegNo>_<TestCode>.pdf) in Quemint Green (#0a6b3c) and White (#FFFFFF).
  */
@@ -360,9 +540,13 @@ export function downloadCandidateResultSlipPdf(
   doc.setLineWidth(0.8);
   doc.line(marginX, 168, pageWidth - marginX, 168);
 
-  // 6. Two-Column Candidate Particulars Grid
-  const genderStr = res.gender || candidate?.gender || 'Male';
-  const examDateFormatted = formatExamDateTime(res.submittedAt);
+  // 6. Dynamic Two-Column Candidate Particulars Grid
+  const dynamicRows = resolveResultSlipFieldRows(
+    res,
+    candidate,
+    settings,
+    _rankInfo
+  );
 
   const leftColX = marginX + 12;
   const rightColX = pageWidth / 2 + 12;
@@ -373,29 +557,29 @@ export function downloadCandidateResultSlipPdf(
     label: string,
     value: string
   ) => {
+    const cleanLabel = label.endsWith(':') ? label : `${label}:`;
     doc.setFont('helvetica', 'normal');
     doc.setFontSize(9.5);
     doc.setTextColor(115, 122, 130);
-    doc.text(label, x, y);
-    const labelW = doc.getTextWidth(`${label}    `);
+    doc.text(cleanLabel, x, y);
+    const labelW = doc.getTextWidth(`${cleanLabel}   `);
 
     doc.setFont('helvetica', 'bold');
     doc.setFontSize(9.5);
     doc.setTextColor(24, 24, 27);
-    doc.text(value, x + labelW, y);
+    doc.text(String(value || '—'), x + labelW, y);
   };
 
-  // Left Column: Candidate Name, Registration Number, Gender
-  drawLabelValue(leftColX, 192, 'Candidate Name:', res.candidateName);
-  drawLabelValue(leftColX, 212, 'Registration Number:', res.regNumber);
-  drawLabelValue(leftColX, 232, 'Gender:', genderStr);
-
-  // Right Column: Category, Exam Date/Time
-  drawLabelValue(rightColX, 192, 'Category:', res.category.toLowerCase());
-  drawLabelValue(rightColX, 212, 'Exam Date/Time:', examDateFormatted);
+  const numGridRows = Math.ceil(dynamicRows.length / 2);
+  dynamicRows.forEach((row, index) => {
+    const isLeft = index % 2 === 0;
+    const rowIdx = Math.floor(index / 2);
+    const yPos = 192 + rowIdx * 20;
+    drawLabelValue(isLeft ? leftColX : rightColX, yPos, row.label, row.value);
+  });
 
   // 7. Subject & Score Table (Soft Green Tinted Header + Alternating Subject Rows)
-  const tableTopY = 260;
+  const tableTopY = Math.max(252, 192 + numGridRows * 20 + 14);
   const headerH = 30;
   const rowH = 28;
 
@@ -880,6 +1064,9 @@ export function downloadRegistrationSlipPdf(
     ['Gender', candidate.gender],
     ['Examination Category', candidate.category.toUpperCase()],
     ['Registration Number', candidate.regNumber || 'Not Generated'],
+    ['Examination Centre', candidate.examCenterName || 'Main Hall'],
+    ['Course of Study', candidate.courseOfStudy || 'General Studies'],
+    ['State of Origin', candidate.stateOfOrigin || '—'],
   ];
 
   if (!isFree) {

@@ -20,19 +20,33 @@ import {
   Mail,
   CheckCircle2,
   ExternalLink,
+  ChevronDown,
+  ChevronUp,
+  MapPin,
+  BookOpen,
+  GraduationCap,
+  Lock,
+  X,
 } from 'lucide-react';
 import {
   Candidate,
   CategoryType,
+  ExamCenter,
   ExamSettings,
   GenderType,
   PaymentMethodType,
 } from '../types';
-import { DEFAULT_SUBJECT_COMBINATIONS } from '../data/initialData';
+import {
+  DEFAULT_EXAM_CENTERS,
+  DEFAULT_SUBJECTS_LIST,
+  DEFAULT_SUBJECT_COMBINATIONS,
+  STANDARD_CATEGORIES,
+} from '../data/initialData';
 import { QuemintSeal } from './QuemintSeal';
 import { RegistrationSlipModal } from './RegistrationSlipModal';
 import { LivePhotoCaptureCard } from './LivePhotoCaptureCard';
 import { generateUniqueQmtRegNumber } from '../utils/pdfSlipGenerator';
+import { simpleFallbackHash } from '../utils/passwordHash';
 
 interface RegistrationFlowProps {
   candidates: Candidate[];
@@ -40,6 +54,7 @@ interface RegistrationFlowProps {
   activeCandidateId: string | null;
   onSetActiveCandidateId: (id: string | null) => void;
   onRegisterOrUpdateCandidate: (candidate: Candidate, eventTitle?: string, eventMsg?: string) => void;
+  onUpdateSettings?: (settings: ExamSettings) => void;
   onBackToLogin: (prefillRegNo?: string) => void;
   onOpenAdminForConfirmation: () => void;
 }
@@ -52,6 +67,7 @@ export const RegistrationFlow: React.FC<RegistrationFlowProps> = ({
   activeCandidateId,
   onSetActiveCandidateId,
   onRegisterOrUpdateCandidate,
+  onUpdateSettings,
   onBackToLogin,
   onOpenAdminForConfirmation,
 }) => {
@@ -60,16 +76,76 @@ export const RegistrationFlow: React.FC<RegistrationFlowProps> = ({
       ? settings.subjectCombinations
       : DEFAULT_SUBJECT_COMBINATIONS;
 
+  const allSubjects =
+    settings.availableSubjects && settings.availableSubjects.length > 0
+      ? settings.availableSubjects
+      : DEFAULT_SUBJECTS_LIST;
+
+  const examCenters: ExamCenter[] =
+    settings.examCenters && settings.examCenters.length > 0
+      ? settings.examCenters
+      : DEFAULT_EXAM_CENTERS;
+
+  const availableExamCenters = examCenters.filter(
+    (ec) => ec.currentCount < ec.maxCapacity
+  );
+
   // Find active candidate if already created in this session
   const existingCandidate = candidates.find((c) => c.id === activeCandidateId) || null;
 
+  // Existing registration fields (kept 100% intact)
   const [firstName, setFirstName] = useState(existingCandidate?.firstName || '');
   const [middleName, setMiddleName] = useState(existingCandidate?.middleName || '');
   const [surname, setSurname] = useState(existingCandidate?.surname || '');
   const [gender, setGender] = useState<GenderType>(existingCandidate?.gender || 'Female');
-  const [category, setCategory] = useState<CategoryType>(
-    existingCandidate?.category || subjectCombinations[0]?.name || 'Medical'
+  const [email, setEmail] = useState(existingCandidate?.email || '');
+  const [phone, setPhone] = useState(existingCandidate?.phone || '');
+  const [password, setPassword] = useState(existingCandidate?.password || '');
+
+  // Step A: State of Origin
+  const [stateOfOrigin, setStateOfOrigin] = useState(existingCandidate?.stateOfOrigin || '');
+
+  // Step B: Course of Study
+  const [courseOfStudy, setCourseOfStudy] = useState(existingCandidate?.courseOfStudy || '');
+
+  // Step C: Subject Combination (Checkbox Dropdown — start empty with no demo subjects; student clicks to open list, checks 4 subjects, clicks Confirm)
+  const [selectedSubjectsDraft, setSelectedSubjectsDraft] = useState<string[]>(() => {
+    if (existingCandidate?.subjectCombination) {
+      return existingCandidate.subjectCombination
+        .split(',')
+        .map((s) => s.trim())
+        .filter(Boolean);
+    }
+    return [];
+  });
+  const [confirmedSubjects, setConfirmedSubjects] = useState<string[]>(() => {
+    if (existingCandidate?.subjectCombination) {
+      return existingCandidate.subjectCombination
+        .split(',')
+        .map((s) => s.trim())
+        .filter(Boolean);
+    }
+    return [];
+  });
+  const [isSubjectDropdownOpen, setIsSubjectDropdownOpen] = useState(false);
+  const [subjectConfirmedBadge, setSubjectConfirmedBadge] = useState<boolean>(
+    Boolean(existingCandidate?.subjectCombination)
   );
+
+  // Step D: Category (3 options: Science, Art, Commercial — single select checkbox with Confirm button)
+  const [categoryDraft, setCategoryDraft] = useState<CategoryType>(
+    existingCandidate?.category || 'Science'
+  );
+  const [category, setCategory] = useState<CategoryType>(
+    existingCandidate?.category || 'Science'
+  );
+  const [categoryConfirmedBadge, setCategoryConfirmedBadge] = useState(true);
+
+  // Step E: Exam Center / Q-Zones (Checkbox list of available centers where current_count < max_capacity)
+  const [selectedExamCenterId, setSelectedExamCenterId] = useState<string>(
+    existingCandidate?.examCenterId || availableExamCenters[0]?.id || ''
+  );
+
   const [passportDataUrl, setPassportDataUrl] = useState<string>(() => {
     const raw = existingCandidate?.passportDataUrl || '';
     return raw.startsWith('/proctoring/') ? '' : raw;
@@ -119,6 +195,7 @@ export const RegistrationFlow: React.FC<RegistrationFlowProps> = ({
   const [showConfirmedSuccessPopup, setShowConfirmedSuccessPopup] = useState(false);
 
   const proofInputRef = useRef<HTMLInputElement>(null);
+  const incrementedCenterForCandidateRef = useRef<Record<string, string>>({});
   const requirePhotoCard = Boolean(settings.requirePhotoCardDuringRegistration);
 
   // Sync local fields when switching to a specific activeCandidateId
@@ -128,7 +205,26 @@ export const RegistrationFlow: React.FC<RegistrationFlowProps> = ({
       setMiddleName(existingCandidate.middleName);
       setSurname(existingCandidate.surname);
       setGender(existingCandidate.gender);
+      setEmail(existingCandidate.email || '');
+      setPhone(existingCandidate.phone || '');
+      setPassword(existingCandidate.password || '');
+      setStateOfOrigin(existingCandidate.stateOfOrigin || '');
+      setCourseOfStudy(existingCandidate.courseOfStudy || '');
+      if (existingCandidate.subjectCombination) {
+        const parsedSubjs = existingCandidate.subjectCombination
+          .split(',')
+          .map((s) => s.trim())
+          .filter(Boolean);
+        if (parsedSubjs.length > 0) {
+          setSelectedSubjectsDraft(parsedSubjs);
+          setConfirmedSubjects(parsedSubjs);
+        }
+      }
       setCategory(existingCandidate.category);
+      setCategoryDraft(existingCandidate.category);
+      if (existingCandidate.examCenterId) {
+        setSelectedExamCenterId(existingCandidate.examCenterId);
+      }
       const cleanPassport = existingCandidate.passportDataUrl?.startsWith('/proctoring/')
         ? ''
         : existingCandidate.passportDataUrl || '';
@@ -136,18 +232,85 @@ export const RegistrationFlow: React.FC<RegistrationFlowProps> = ({
     }
   }, [activeCandidateId]);
 
-  // Ensure selected category stays valid when Admin updates or renames Subject Combinations
+  // Keep selectedExamCenterId defaulted to first available zone if none selected yet
   useEffect(() => {
-    if (subjectCombinations.length === 0) return;
-    const matched = subjectCombinations.find(
-      (c) => c.name.trim().toLowerCase() === category.trim().toLowerCase()
-    );
-    if (!matched) {
-      setCategory(subjectCombinations[0].name);
-    } else if (matched.name !== category) {
-      setCategory(matched.name);
+    if (!selectedExamCenterId && availableExamCenters.length > 0) {
+      setSelectedExamCenterId(availableExamCenters[0].id);
     }
-  }, [subjectCombinations]);
+  }, [availableExamCenters, selectedExamCenterId]);
+
+  const handleToggleSubjectCheckbox = (subj: string) => {
+    setSelectedSubjectsDraft((prev) => {
+      const exists = prev.some((s) => s.toLowerCase() === subj.toLowerCase());
+      if (exists) {
+        const next = prev.filter((s) => s.toLowerCase() !== subj.toLowerCase());
+        setSubjectConfirmedBadge(false);
+        setConfirmedSubjects((prevConf) =>
+          prevConf.filter((s) => s.toLowerCase() !== subj.toLowerCase())
+        );
+        return next;
+      }
+      setFormError('');
+      setSubjectConfirmedBadge(false);
+      return [...prev, subj];
+    });
+  };
+
+  const handleConfirmSubjectCombination = () => {
+    if (selectedSubjectsDraft.length === 0) {
+      setFormError('Please select at least one subject before clicking Confirm.');
+      return;
+    }
+    setFormError('');
+    setConfirmedSubjects([...selectedSubjectsDraft]);
+    setSubjectConfirmedBadge(true);
+    setIsSubjectDropdownOpen(false);
+    if (existingCandidate) {
+      onRegisterOrUpdateCandidate({
+        ...existingCandidate,
+        subjectCombination: selectedSubjectsDraft.join(', '),
+      });
+    }
+  };
+
+  const handleConfirmCategory = () => {
+    setCategory(categoryDraft);
+    setCategoryConfirmedBadge(true);
+    if (existingCandidate) {
+      onRegisterOrUpdateCandidate({
+        ...existingCandidate,
+        category: categoryDraft,
+      });
+    }
+  };
+
+  // Increment exam center currentCount once when assigning a candidate
+  const assignExamCenterAndIncrement = (candId: string, centerId: string) => {
+    const chosenCenter =
+      examCenters.find((ec) => ec.id === centerId) || availableExamCenters[0];
+    if (!chosenCenter) {
+      return { examCenterId: undefined, examCenterName: undefined };
+    }
+    const alreadyAssignedCenterId =
+      existingCandidate?.examCenterId || incrementedCenterForCandidateRef.current[candId];
+    if (alreadyAssignedCenterId !== chosenCenter.id && onUpdateSettings) {
+      incrementedCenterForCandidateRef.current[candId] = chosenCenter.id;
+      const updatedCenters = examCenters.map((ec) => {
+        if (ec.id === chosenCenter.id && ec.currentCount < ec.maxCapacity) {
+          return { ...ec, currentCount: ec.currentCount + 1 };
+        }
+        return ec;
+      });
+      onUpdateSettings({
+        ...settings,
+        examCenters: updatedCenters,
+      });
+    }
+    return {
+      examCenterId: chosenCenter.id,
+      examCenterName: chosenCenter.name,
+    };
+  };
 
   const handleCopy = (text: string, key: string) => {
     if (!text) return;
@@ -161,6 +324,14 @@ export const RegistrationFlow: React.FC<RegistrationFlowProps> = ({
       setFormError('Please enter both your First Name and Surname before proceeding.');
       return false;
     }
+    const activeSubjs =
+      confirmedSubjects.length > 0 ? confirmedSubjects : selectedSubjectsDraft;
+    if (activeSubjs.length === 0) {
+      setFormError(
+        'Please select your subjects in Step C (Subject Combination) and click Confirm.'
+      );
+      return false;
+    }
     if (requirePhotoCard && !passportDataUrl) {
       setFormError(
         'Live Photo Card Capture is required. Please use the live camera below and align 1 face inside the oval guide before submitting.'
@@ -169,6 +340,30 @@ export const RegistrationFlow: React.FC<RegistrationFlowProps> = ({
     }
     setFormError('');
     return true;
+  };
+
+  const getCandidateExtraFields = (candId: string) => {
+    const finalSubjs =
+      confirmedSubjects.length > 0 ? confirmedSubjects : selectedSubjectsDraft;
+    const finalCat = categoryConfirmedBadge ? category : categoryDraft;
+    const { examCenterId, examCenterName } = assignExamCenterAndIncrement(
+      candId,
+      selectedExamCenterId
+    );
+    return {
+      email: email.trim(),
+      phone: phone.trim(),
+      password: password,
+      passwordHash: password.trim()
+        ? simpleFallbackHash(password.trim())
+        : existingCandidate?.passwordHash,
+      stateOfOrigin: stateOfOrigin.trim(),
+      courseOfStudy: courseOfStudy.trim(),
+      subjectCombination: finalSubjs.join(', '),
+      category: finalCat,
+      examCenterId,
+      examCenterName,
+    };
   };
 
   // Handle Live Camera Photo Capture (No file/gallery upload allowed)
@@ -209,13 +404,14 @@ export const RegistrationFlow: React.FC<RegistrationFlowProps> = ({
       setDvaAccount(assigned);
 
       const candId = existingCandidate?.id || `cand-${Date.now()}`;
+      const extraFields = getCandidateExtraFields(candId);
       const newCand: Candidate = {
         id: candId,
         firstName: firstName.trim(),
         middleName: middleName.trim(),
         surname: surname.trim(),
         gender,
-        category,
+        ...extraFields,
         regNumber: existingCandidate?.regNumber || '',
         pin: existingCandidate?.pin || '',
         paymentStatus: 'Pending',
@@ -283,13 +479,14 @@ export const RegistrationFlow: React.FC<RegistrationFlowProps> = ({
         // Fallback PIN already set
       }
 
+      const extraFields = getCandidateExtraFields(candId);
       const updatedCand: Candidate = {
         id: candId,
         firstName: firstName.trim(),
         middleName: middleName.trim(),
         surname: surname.trim(),
         gender,
-        category,
+        ...extraFields,
         regNumber: existingCandidate?.regNumber || '',
         pin: generatedPin,
         paymentStatus: 'Paid',
@@ -334,6 +531,7 @@ export const RegistrationFlow: React.FC<RegistrationFlowProps> = ({
   const handleSubmitManualProof = () => {
     if (!validateDetails()) return;
     const candId = existingCandidate?.id || `cand-${Date.now()}`;
+    const extraFields = getCandidateExtraFields(candId);
     const txRef = existingCandidate?.transactionRef || `MNP-9135688236-${Math.floor(100 + Math.random() * 900)}`;
     const newCand: Candidate = {
       id: candId,
@@ -341,7 +539,7 @@ export const RegistrationFlow: React.FC<RegistrationFlowProps> = ({
       middleName: middleName.trim(),
       surname: surname.trim(),
       gender,
-      category,
+      ...extraFields,
       regNumber: existingCandidate?.regNumber || '',
       pin: existingCandidate?.pin || '',
       paymentStatus: existingCandidate?.paymentStatus || 'Pending',
@@ -372,6 +570,7 @@ export const RegistrationFlow: React.FC<RegistrationFlowProps> = ({
     setCardProcessing(true);
     setTimeout(() => {
       const candId = existingCandidate?.id || `cand-${Date.now()}`;
+      const extraFields = getCandidateExtraFields(candId);
       const generatedPin = `QMT-${Math.floor(100000 + Math.random() * 900000)}`;
       const txRef = `QMT-CRD-${Date.now().toString().slice(-6)}`;
       const updatedCand: Candidate = {
@@ -380,7 +579,7 @@ export const RegistrationFlow: React.FC<RegistrationFlowProps> = ({
         middleName: middleName.trim(),
         surname: surname.trim(),
         gender,
-        category,
+        ...extraFields,
         regNumber: existingCandidate?.regNumber || '',
         pin: generatedPin,
         paymentStatus: 'Paid',
@@ -417,6 +616,7 @@ export const RegistrationFlow: React.FC<RegistrationFlowProps> = ({
 
     const generatedRegNo = generateUniqueQmtRegNumber(candidates);
     const candId = existingCandidate?.id || `cand-${Date.now()}`;
+    const extraFields = getCandidateExtraFields(candId);
 
     const updatedCand: Candidate = {
       id: candId,
@@ -424,7 +624,7 @@ export const RegistrationFlow: React.FC<RegistrationFlowProps> = ({
       middleName: middleName.trim(),
       surname: surname.trim(),
       gender,
-      category,
+      ...extraFields,
       regNumber: generatedRegNo,
       pin: isFreeRegistration ? '' : existingCandidate?.pin || '',
       paymentStatus: existingCandidate?.paymentStatus || 'Pending',
@@ -466,6 +666,7 @@ export const RegistrationFlow: React.FC<RegistrationFlowProps> = ({
       ? existingCandidate?.regNumber || generateUniqueQmtRegNumber(candidates)
       : existingCandidate?.regNumber || '';
     const candId = existingCandidate?.id || `cand-${Date.now()}`;
+    const extraFields = getCandidateExtraFields(candId);
 
     const updatedCand: Candidate = {
       id: candId,
@@ -473,7 +674,7 @@ export const RegistrationFlow: React.FC<RegistrationFlowProps> = ({
       middleName: middleName.trim(),
       surname: surname.trim(),
       gender,
-      category,
+      ...extraFields,
       regNumber: generatedRegNo,
       pin: isFreeRegistration || !isRegNumberGenerationAllowed ? '' : existingCandidate?.pin || '',
       paymentStatus: existingCandidate?.paymentStatus || 'Pending',
@@ -503,7 +704,7 @@ export const RegistrationFlow: React.FC<RegistrationFlowProps> = ({
     onRegisterOrUpdateCandidate(
       updatedCand,
       'Candidate Registration Submitted',
-      `${updatedCand.firstName} ${updatedCand.middleName ? updatedCand.middleName + ' ' : ''}${updatedCand.surname} (${updatedCand.gender}, ${updatedCand.category}) submitted registration details${generatedRegNo ? ` (Reg No: ${generatedRegNo})` : ' (Awaiting Admin Approval & QMT Reg Number Generation)'}.`
+      `${updatedCand.firstName} ${updatedCand.middleName ? updatedCand.middleName + ' ' : ''}${updatedCand.surname} (${updatedCand.gender}, ${updatedCand.category}${updatedCand.examCenterName ? ` • ${updatedCand.examCenterName}` : ''}) submitted registration details${generatedRegNo ? ` (Reg No: ${generatedRegNo})` : ' (Awaiting Admin Approval & QMT Reg Number Generation)'}.`
     );
 
     if (!isRegNumberGenerationAllowed) {
@@ -517,6 +718,16 @@ export const RegistrationFlow: React.FC<RegistrationFlowProps> = ({
   const currentPin = existingCandidate?.pin || '';
   const currentRegNo = existingCandidate?.regNumber || '';
   const isPaid = existingCandidate?.paymentStatus === 'Paid';
+
+  // Category options (Science, Art, Commercial + any custom admin categories)
+  const categoryOptions: string[] = Array.from(
+    new Set([
+      ...STANDARD_CATEGORIES,
+      ...subjectCombinations.map((sc) => sc.name).filter(
+        (n) => !['medical', 'engineering', 'arts'].includes(n.trim().toLowerCase())
+      ),
+    ])
+  );
 
   return (
     <div className="min-h-screen bg-white text-black">
@@ -541,6 +752,15 @@ export const RegistrationFlow: React.FC<RegistrationFlowProps> = ({
               setFirstName('');
               setMiddleName('');
               setSurname('');
+              setEmail('');
+              setPhone('');
+              setPassword('');
+              setStateOfOrigin('');
+              setCourseOfStudy('');
+              setSelectedSubjectsDraft([]);
+              setConfirmedSubjects([]);
+              setSubjectConfirmedBadge(false);
+              setIsSubjectDropdownOpen(false);
               setDvaAccount(null);
               setManualSubmitted(false);
             }}
@@ -575,8 +795,8 @@ export const RegistrationFlow: React.FC<RegistrationFlowProps> = ({
               {!isRegNumberGenerationAllowed
                 ? 'Fill in your candidate registration details below and click Confirmed to submit your registration for Admin approval.'
                 : isFreeRegistration
-                ? 'Complete your bio-data, select your examination category, generate your Registration Number, and submit your details for Admin approval to activate your Registration Number for exam login.'
-                : 'Complete your bio-data, select your examination category, and verify your registration fee to receive your official Examination PIN inside the GREEN BOX.'}
+                ? 'Complete your bio-data, select your subjects, category, and Examination Centre, generate your Registration Number, and submit your details for Admin approval.'
+                : 'Complete your bio-data, select your subjects, category, and Examination Centre, and verify your registration fee to receive your official Examination PIN inside the GREEN BOX.'}
             </p>
           </div>
           {isRegNumberGenerationAllowed && (
@@ -611,7 +831,7 @@ export const RegistrationFlow: React.FC<RegistrationFlowProps> = ({
               isRegNumberGenerationAllowed ? 'lg:col-span-7' : 'lg:col-span-12 max-w-3xl mx-auto w-full'
             } space-y-6`}
           >
-            {/* STEP 1: Fill Candidate Details */}
+            {/* STEP 1: Fill Candidate Details (Existing Fields + Steps A–E) */}
             <section className="bg-white rounded-2xl border border-neutral-200 p-6 space-y-5 shadow-xs">
               <div className="flex items-center justify-between border-b border-neutral-200 pb-4">
                 <div>
@@ -619,7 +839,7 @@ export const RegistrationFlow: React.FC<RegistrationFlowProps> = ({
                     Step 01
                   </span>
                   <h2 className="text-lg font-extrabold text-black">
-                    Candidate Bio-Data & Category
+                    Candidate Bio-Data, Subject Combination &amp; Examination Centre
                   </h2>
                 </div>
                 <span className="px-3 py-1 rounded-md bg-[#0a6b3c] text-white text-xs font-bold">
@@ -627,6 +847,7 @@ export const RegistrationFlow: React.FC<RegistrationFlowProps> = ({
                 </span>
               </div>
 
+              {/* Existing Name Fields */}
               <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
                 <div>
                   <label className="block text-xs font-bold uppercase tracking-wider text-neutral-700 mb-1.5">
@@ -668,7 +889,58 @@ export const RegistrationFlow: React.FC<RegistrationFlowProps> = ({
                 </div>
               </div>
 
-              {/* Gender Checkboxes: [ Checkbox ] Male / Female */}
+              {/* Existing Account / Contact Fields (Email, Phone, Password) */}
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+                <div>
+                  <label className="block text-xs font-bold uppercase tracking-wider text-neutral-700 mb-1.5">
+                    Email Address
+                  </label>
+                  <div className="relative">
+                    <Mail className="w-4 h-4 text-neutral-400 absolute left-3 top-1/2 -translate-y-1/2" />
+                    <input
+                      type="email"
+                      value={email}
+                      onChange={(e) => setEmail(e.target.value)}
+                      placeholder="student@email.com"
+                      className="w-full pl-9 pr-3.5 py-2.5 text-sm rounded-lg border border-neutral-300 focus:border-[#0a6b3c] focus:outline-none text-black bg-white"
+                    />
+                  </div>
+                </div>
+
+                <div>
+                  <label className="block text-xs font-bold uppercase tracking-wider text-neutral-700 mb-1.5">
+                    Phone Number
+                  </label>
+                  <div className="relative">
+                    <Phone className="w-4 h-4 text-neutral-400 absolute left-3 top-1/2 -translate-y-1/2" />
+                    <input
+                      type="tel"
+                      value={phone}
+                      onChange={(e) => setPhone(e.target.value)}
+                      placeholder="e.g. 08031234567"
+                      className="w-full pl-9 pr-3.5 py-2.5 text-sm rounded-lg border border-neutral-300 focus:border-[#0a6b3c] focus:outline-none text-black bg-white"
+                    />
+                  </div>
+                </div>
+
+                <div>
+                  <label className="block text-xs font-bold uppercase tracking-wider text-neutral-700 mb-1.5">
+                    Password
+                  </label>
+                  <div className="relative">
+                    <Lock className="w-4 h-4 text-neutral-400 absolute left-3 top-1/2 -translate-y-1/2" />
+                    <input
+                      type="password"
+                      value={password}
+                      onChange={(e) => setPassword(e.target.value)}
+                      placeholder="Create password"
+                      className="w-full pl-9 pr-3.5 py-2.5 text-sm rounded-lg border border-neutral-300 focus:border-[#0a6b3c] focus:outline-none text-black bg-white"
+                    />
+                  </div>
+                </div>
+              </div>
+
+              {/* Existing Gender Checkboxes: [ Checkbox ] Male / Female */}
               <div>
                 <label className="block text-xs font-bold uppercase tracking-wider text-neutral-700 mb-2">
                   Gender (Select Checkbox)
@@ -699,53 +971,297 @@ export const RegistrationFlow: React.FC<RegistrationFlowProps> = ({
                 </div>
               </div>
 
-              {/* Subject Combination Name (Category) Checkboxes */}
-              <div>
-                <label className="block text-xs font-bold uppercase tracking-wider text-neutral-700 mb-2">
-                  Subject Combination / Category (Select Checkbox)
-                </label>
-                <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-4 gap-3">
-                  {subjectCombinations.map((combo) => {
+              {/* STEP A & STEP B: State of Origin + Course of Study */}
+              <div className="pt-3 border-t border-neutral-200 grid grid-cols-1 sm:grid-cols-2 gap-4">
+                <div>
+                  <label className="block text-xs font-extrabold uppercase tracking-wider text-[#0a6b3c] mb-1.5">
+                    Step A • State of Origin
+                  </label>
+                  <input
+                    type="text"
+                    value={stateOfOrigin}
+                    onChange={(e) => setStateOfOrigin(e.target.value)}
+                    placeholder="e.g. Anambra, Lagos, Kano"
+                    className="w-full px-3.5 py-2.5 text-sm rounded-lg border border-neutral-300 focus:border-[#0a6b3c] focus:outline-none text-black bg-white"
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-xs font-extrabold uppercase tracking-wider text-[#0a6b3c] mb-1.5">
+                    Step B • Course of Study
+                  </label>
+                  <div className="relative">
+                    <GraduationCap className="w-4 h-4 text-[#0a6b3c] absolute left-3 top-1/2 -translate-y-1/2" />
+                    <input
+                      type="text"
+                      value={courseOfStudy}
+                      onChange={(e) => setCourseOfStudy(e.target.value)}
+                      placeholder="e.g. Medicine, Law, Computer Science"
+                      className="w-full pl-9 pr-3.5 py-2.5 text-sm rounded-lg border border-neutral-300 focus:border-[#0a6b3c] focus:outline-none text-black bg-white"
+                    />
+                  </div>
+                </div>
+              </div>
+
+              {/* STEP C: Subject Combination (Checkbox Dropdown + Any Number of Subjects + Confirm Button + Tags) */}
+              <div className="pt-3 border-t border-neutral-200 space-y-3">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <div>
+                    <label className="block text-xs font-extrabold uppercase tracking-wider text-[#0a6b3c]">
+                      Step C • Subject Combination
+                    </label>
+                    <p className="text-xs text-neutral-600 mt-0.5">
+                      <strong>Instructions:</strong> Click <strong>&quot;Select Subject Combination&quot;</strong> below to open the subject list, check your examination subjects, and click <strong>Confirm</strong>.
+                    </p>
+                  </div>
+                  <span
+                    className={`px-2.5 py-1 rounded-full text-[11px] font-extrabold ${
+                      selectedSubjectsDraft.length > 0
+                        ? 'bg-[#0a6b3c]/15 text-[#0a6b3c]'
+                        : 'bg-neutral-100 text-neutral-700'
+                    }`}
+                  >
+                    {selectedSubjectsDraft.length} Checked
+                  </span>
+                </div>
+
+                {/* Selected Subject Tags (Only shown after student confirms or selects subjects) */}
+                {confirmedSubjects.length > 0 && (
+                  <div className="flex flex-wrap items-center gap-1.5">
+                    {confirmedSubjects.map((subj) => (
+                      <span
+                        key={subj}
+                        className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-[#0a6b3c] text-white text-xs font-bold shadow-2xs"
+                      >
+                        <BookOpen className="w-3 h-3" />
+                        <span>{subj}</span>
+                        <button
+                          type="button"
+                          onClick={() => handleToggleSubjectCheckbox(subj)}
+                          className="hover:text-white/75 cursor-pointer"
+                          title={`Remove ${subj}`}
+                        >
+                          <X className="w-3 h-3" />
+                        </button>
+                      </span>
+                    ))}
+                    {subjectConfirmedBadge && confirmedSubjects.length > 0 && (
+                      <span className="text-[11px] font-extrabold text-[#0a6b3c] ml-1 flex items-center gap-1">
+                        <CheckCircle2 className="w-3.5 h-3.5" />
+                        Confirmed
+                      </span>
+                    )}
+                  </div>
+                )}
+
+                {/* Dropdown Trigger Button */}
+                <div className="relative">
+                  <button
+                    type="button"
+                    onClick={() => setIsSubjectDropdownOpen((prev) => !prev)}
+                    className="w-full px-4 py-3 rounded-xl border-2 border-[#0a6b3c] bg-neutral-50 hover:bg-[#0a6b3c]/5 text-left flex items-center justify-between gap-2 transition-colors cursor-pointer"
+                  >
+                    <span className="text-xs font-extrabold text-black">
+                      {confirmedSubjects.length > 0 && subjectConfirmedBadge
+                        ? `Subject Combination Confirmed (${confirmedSubjects.length}): ${confirmedSubjects.join(', ')}`
+                        : selectedSubjectsDraft.length > 0
+                        ? `Selecting Subjects (${selectedSubjectsDraft.length} checked) — Click to view list`
+                        : 'Select Subject Combination (Click to open subject list & check subjects)'}
+                    </span>
+                    {isSubjectDropdownOpen ? (
+                      <ChevronUp className="w-4 h-4 text-[#0a6b3c] shrink-0" />
+                    ) : (
+                      <ChevronDown className="w-4 h-4 text-[#0a6b3c] shrink-0" />
+                    )}
+                  </button>
+
+                  {isSubjectDropdownOpen && (
+                    <div className="mt-2 p-4 rounded-xl border-2 border-[#0a6b3c] bg-white shadow-lg space-y-3">
+                      <div className="flex items-center justify-between border-b border-neutral-200 pb-2">
+                        <span className="text-xs font-extrabold text-[#0a6b3c]">
+                          Check Subjects ({selectedSubjectsDraft.length} checked)
+                        </span>
+                        <button
+                          type="button"
+                          onClick={handleConfirmSubjectCombination}
+                          disabled={selectedSubjectsDraft.length === 0}
+                          className="px-3.5 py-1.5 rounded-lg bg-[#0a6b3c] hover:bg-[#0e8a4e] text-white text-xs font-extrabold inline-flex items-center gap-1.5 transition-colors cursor-pointer disabled:opacity-50"
+                        >
+                          <Check className="w-3.5 h-3.5" />
+                          <span>Confirm Subjects</span>
+                        </button>
+                      </div>
+
+                      <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-2 max-h-60 overflow-y-auto pr-1">
+                        {allSubjects.map((subj) => {
+                          const isChecked = selectedSubjectsDraft.some(
+                            (s) => s.toLowerCase() === subj.toLowerCase()
+                          );
+                          return (
+                            <button
+                              key={subj}
+                              type="button"
+                              onClick={() => handleToggleSubjectCheckbox(subj)}
+                              className={`flex items-center gap-2 px-3 py-2 rounded-lg border text-xs font-bold text-left transition-colors cursor-pointer ${
+                                isChecked
+                                  ? 'bg-[#0a6b3c] text-white border-[#0a6b3c]'
+                                  : 'bg-white text-black border-neutral-300 hover:border-[#0a6b3c]'
+                              }`}
+                            >
+                              {isChecked ? (
+                                <CheckSquare className="w-4 h-4 shrink-0" />
+                              ) : (
+                                <Square className="w-4 h-4 shrink-0 text-neutral-400" />
+                              )}
+                              <span className="truncate">{subj}</span>
+                            </button>
+                          );
+                        })}
+                      </div>
+
+                      <div className="pt-2 border-t border-neutral-200 flex items-center justify-between gap-2">
+                        <span className="text-[11px] text-neutral-500">
+                          Saved as comma-separated: <strong>{selectedSubjectsDraft.join(', ') || 'None'}</strong>
+                        </span>
+                        <button
+                          type="button"
+                          onClick={handleConfirmSubjectCombination}
+                          disabled={selectedSubjectsDraft.length === 0}
+                          className="px-4 py-2 rounded-lg bg-[#0a6b3c] hover:bg-[#0e8a4e] text-white text-xs font-extrabold inline-flex items-center gap-1.5 transition-colors cursor-pointer disabled:opacity-50"
+                        >
+                          <CheckCircle2 className="w-3.5 h-3.5" />
+                          <span>Confirm</span>
+                        </button>
+                      </div>
+                    </div>
+                  )}
+                </div>
+              </div>
+
+              {/* STEP D: Category (CHECKBOX: Science, Art, Commercial + Confirm Button) */}
+              <div className="pt-3 border-t border-neutral-200 space-y-2.5">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <div>
+                    <label className="block text-xs font-extrabold uppercase tracking-wider text-[#0a6b3c]">
+                      Step D • Category (Checkbox — Science, Art, Commercial)
+                    </label>
+                    <p className="text-[11px] text-neutral-500 mt-0.5">
+                      Select your category and click <strong>Confirm</strong>. Categories are not locked to fixed subjects.
+                    </p>
+                  </div>
+                  {categoryConfirmedBadge && (
+                    <span className="inline-flex items-center gap-1 text-[11px] font-extrabold text-[#0a6b3c]">
+                      <CheckCircle2 className="w-3.5 h-3.5" />
+                      Confirmed: {category}
+                    </span>
+                  )}
+                </div>
+
+                <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                  {categoryOptions.map((catOption) => {
                     const checked =
-                      category.trim().toLowerCase() === combo.name.trim().toLowerCase();
+                      categoryDraft.trim().toLowerCase() === catOption.trim().toLowerCase();
                     return (
                       <button
-                        key={combo.id}
+                        key={catOption}
                         type="button"
                         onClick={() => {
-                          setCategory(combo.name);
-                          if (existingCandidate) {
-                            onRegisterOrUpdateCandidate({
-                              ...existingCandidate,
-                              category: combo.name,
-                            });
-                          }
+                          setCategoryDraft(catOption);
+                          setCategory(catOption);
+                          setCategoryConfirmedBadge(false);
                         }}
-                        className={`flex flex-col items-start gap-1 px-3.5 py-2.5 rounded-lg border text-xs font-bold transition-colors cursor-pointer text-left ${
+                        className={`flex items-center gap-2.5 px-4 py-3 rounded-xl border text-xs font-extrabold transition-colors cursor-pointer ${
                           checked
                             ? 'bg-[#0a6b3c] text-white border-[#0a6b3c]'
                             : 'bg-white text-black border-neutral-300 hover:border-[#0a6b3c]'
                         }`}
                       >
-                        <div className="flex items-center gap-2 w-full">
-                          {checked ? (
-                            <CheckSquare className="w-4 h-4 shrink-0" />
-                          ) : (
-                            <Square className="w-4 h-4 shrink-0 text-neutral-400" />
-                          )}
-                          <span className="truncate font-extrabold">{combo.name}</span>
-                        </div>
-                        <span
-                          className={`text-[10px] leading-tight ${
-                            checked ? 'text-white/90' : 'text-neutral-500'
-                          }`}
-                        >
-                          {combo.subjects.join(', ')}
-                        </span>
+                        {checked ? (
+                          <CheckSquare className="w-4 h-4 shrink-0" />
+                        ) : (
+                          <Square className="w-4 h-4 shrink-0 text-neutral-400" />
+                        )}
+                        <span>{catOption}</span>
                       </button>
                     );
                   })}
                 </div>
+
+                <div className="flex justify-end">
+                  <button
+                    type="button"
+                    onClick={handleConfirmCategory}
+                    className="px-4 py-2 rounded-lg bg-[#0a6b3c] hover:bg-[#0e8a4e] text-white text-xs font-extrabold inline-flex items-center gap-1.5 transition-colors cursor-pointer"
+                  >
+                    <Check className="w-3.5 h-3.5" />
+                    <span>Confirm Category ({categoryDraft})</span>
+                  </button>
+                </div>
+              </div>
+
+              {/* STEP E: Examination Centre (Checkbox List — only where current_count < max_capacity) */}
+              <div className="pt-3 border-t border-neutral-200 space-y-2.5">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <div>
+                    <label className="block text-xs font-extrabold uppercase tracking-wider text-[#0a6b3c]">
+                      Step E • Examination Centre (Select Available Centre)
+                    </label>
+                    <p className="text-[11px] text-neutral-500 mt-0.5">
+                      Showing available examination centres with remaining capacity (<code className="font-mono">current_count &lt; max_capacity</code>).
+                    </p>
+                  </div>
+                  <span className="px-2.5 py-0.5 rounded-full bg-[#0a6b3c]/10 text-[#0a6b3c] text-[11px] font-extrabold">
+                    {availableExamCenters.length} Centre(s) Available
+                  </span>
+                </div>
+
+                {availableExamCenters.length === 0 ? (
+                  <div className="p-3.5 rounded-xl bg-amber-50 border border-amber-300 text-amber-900 text-xs font-bold">
+                    All Examination Centres are currently at full capacity. Please contact the Administrator to increase centre capacity.
+                  </div>
+                ) : (
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                    {availableExamCenters.map((center) => {
+                      const slotsLeft = Math.max(0, center.maxCapacity - center.currentCount);
+                      const checked = selectedExamCenterId === center.id;
+                      return (
+                        <button
+                          key={center.id}
+                          type="button"
+                          onClick={() => setSelectedExamCenterId(center.id)}
+                          className={`flex items-center justify-between gap-2 px-4 py-3 rounded-xl border text-xs font-bold transition-colors cursor-pointer text-left ${
+                            checked
+                              ? 'bg-[#0a6b3c] text-white border-[#0a6b3c] shadow-2xs'
+                              : 'bg-white text-black border-neutral-300 hover:border-[#0a6b3c]'
+                          }`}
+                        >
+                          <div className="flex items-center gap-2.5 min-w-0">
+                            {checked ? (
+                              <CheckSquare className="w-4 h-4 shrink-0" />
+                            ) : (
+                              <Square className="w-4 h-4 shrink-0 text-neutral-400" />
+                            )}
+                            <div className="truncate">
+                              <div className="font-extrabold flex items-center gap-1">
+                                <MapPin className="w-3.5 h-3.5 shrink-0" />
+                                <span className="truncate">{center.name}</span>
+                              </div>
+                            </div>
+                          </div>
+                          <span
+                            className={`px-2 py-0.5 rounded-md font-mono text-[11px] font-extrabold shrink-0 ${
+                              checked
+                                ? 'bg-[#0e8a4e] text-white'
+                                : 'bg-[#0a6b3c]/10 text-[#0a6b3c]'
+                            }`}
+                          >
+                            {slotsLeft} left
+                          </span>
+                        </button>
+                      );
+                    })}
+                  </div>
+                )}
               </div>
 
               {/* STEP 02 (Only when Admin Require Photo Card During Registration == ON): Live Photo Capture */}
@@ -801,7 +1317,7 @@ export const RegistrationFlow: React.FC<RegistrationFlowProps> = ({
                 {isRegNumberGenerationAllowed && (detailsSavedBanner || existingCandidate) && (
                   <div className="p-3 rounded-xl bg-[#0a6b3c]/10 border border-[#0a6b3c]/30 flex flex-col sm:flex-row sm:items-center justify-between gap-2 text-xs">
                     <span className="font-bold text-[#0a6b3c]">
-                      ✓ Registration details saved ({firstName} {middleName} {surname} • {gender} • {category}). Admin can now view all your filled details before approval.
+                      ✓ Registration details saved ({firstName} {middleName} {surname} • {gender} • {category} • {confirmedSubjects.join(', ')}). Admin can now view all your filled details before approval.
                     </span>
                     <button
                       type="button"
@@ -1503,7 +2019,15 @@ export const RegistrationFlow: React.FC<RegistrationFlowProps> = ({
               middleName,
               surname: surname || 'Student',
               gender,
+              email,
+              phone,
+              stateOfOrigin,
+              courseOfStudy,
+              subjectCombination: confirmedSubjects.join(', '),
               category,
+              examCenterId: selectedExamCenterId,
+              examCenterName:
+                examCenters.find((ec) => ec.id === selectedExamCenterId)?.name || 'Q Zone 1',
               regNumber: currentRegNo || 'QMT2027001AA',
               pin: isFreeRegistration ? '' : currentPin || 'AWAITING-PIN',
               paymentStatus: isPaid ? 'Paid' : 'Pending',

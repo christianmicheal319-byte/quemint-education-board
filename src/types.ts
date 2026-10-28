@@ -19,13 +19,39 @@ export type PaymentMethodType =
 
 export type PaymentStatusType = 'Pending' | 'Paid';
 
+export type ExamStartFlowType = 'dashboard_first' | 'immediate';
+
+export interface SystemSettingItem {
+  id: string;
+  key: 'exam_start_flow' | 'default_candidate_password' | string;
+  value: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface ExamCenter {
+  id: string;
+  name: string; // e.g., "Q Zone 1", "L Zone", "Main Hall"
+  maxCapacity: number; // dynamic any number
+  currentCount: number; // default 0
+}
+
 export interface Candidate {
   id: string;
   firstName: string;
   middleName: string;
   surname: string;
+  email?: string;
+  phone?: string;
+  password?: string;
+  passwordHash?: string; // password_hash in students table
+  stateOfOrigin?: string;
+  courseOfStudy?: string;
+  subjectCombination?: string; // e.g., "English, Mathematics, Biology, Chemistry"
+  examCenterId?: string;
+  examCenterName?: string;
   gender: GenderType;
-  category: CategoryType;
+  category: CategoryType; // 'Science' | 'Art' | 'Commercial'
   regNumber: string; // e.g., 2027015PHA
   pin: string; // Written into GREEN BOX once generated
   paymentStatus: PaymentStatusType;
@@ -80,6 +106,9 @@ export interface ExamResult {
   regNumber: string;
   gender?: GenderType;
   category: CategoryType;
+  courseOfStudy?: string;
+  stateOfOrigin?: string;
+  examCenterName?: string;
   testId?: string;
   testTitle?: string;
   score: number; // Aggregate = sum of all subjects (e.g., 99 + 99 + 99 + 99 = 396)
@@ -119,10 +148,34 @@ export interface PublishedTest {
   subjectAllocations: Record<string, number>; // e.g. { English: 10, Biology: 10, Physics: 5, Chemistry: 5 }
   totalQuestions: number;
   published: boolean;
+  rankingPublished?: boolean; // Only when true does Ranking appear on candidate result slips for this exam
   requireFullscreen: boolean;
   requireCamera: boolean;
   maxAttempts?: number; // Number of attempts permitted per candidate for this published test
   createdAt: string;
+}
+
+export type ResultSlipFieldKey =
+  | 'candidateName'
+  | 'regNumber'
+  | 'category'
+  | 'gender'
+  | 'examinationCentre'
+  | 'courseOfStudy'
+  | 'stateOfOrigin'
+  | 'currentRanking'
+  | 'examDateTime'
+  | 'subjectCombination'
+  | 'email'
+  | 'phone'
+  | string;
+
+export interface ResultSlipFieldConfig {
+  key: ResultSlipFieldKey;
+  label: string;
+  enabled: boolean;
+  isCustom?: boolean;
+  customValue?: string;
 }
 
 export interface LoginPageBannerConfig {
@@ -155,6 +208,13 @@ export interface ExamSettings {
   freeRegistration?: boolean;
   allowRegNumberGeneration?: boolean;
   requirePhotoCardDuringRegistration?: boolean;
+  examStartFlow?: ExamStartFlowType; // "dashboard_first" | "immediate" (system_settings.exam_start_flow)
+  defaultCandidatePassword?: string; // Plain or masked preview for admin convenience
+  defaultCandidatePasswordHash?: string; // Hashed master password stored in system_settings.default_candidate_password
+  systemSettings?: Record<string, string>; // Mirrors system_settings key-value store
+  resultSlipFields?: ResultSlipFieldConfig[]; // Dynamic fields displayed on candidate result slips
+  rankingPublishedByTestId?: Record<string, boolean>; // Per-exam ranking publication state
+  globalRankingPublished?: boolean; // Global fallback ranking publication state
   examSecurityGlobal: boolean;
   proctoringEnabled: boolean;
   allowCheckResults: boolean;
@@ -171,6 +231,8 @@ export interface ExamSettings {
   resultTitles: ResultTitlesConfig;
   brandColors?: BrandColorsConfig;
   subjectCombinations?: SubjectCombinationConfig[];
+  examCenters?: ExamCenter[];
+  availableSubjects?: string[];
   subjectPooling: SubjectPoolConfig[];
   publishedTests: PublishedTest[];
   psychometric: PsychometricConfig;
