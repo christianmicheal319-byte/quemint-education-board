@@ -1,0 +1,6 @@
+{
+  "name": "Quemint Education Board CBT & Registration Portal",
+  "description": "Official Computer-Based Testing (CBT), Candidate Registration, Paystack DVA & Manual Transfer Verification, PIN Generation, and Assessment Control Center for Quemint Education Board.",
+  "requestFramePermissions": ["camera"],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
