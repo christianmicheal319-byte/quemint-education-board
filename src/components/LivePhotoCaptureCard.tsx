@@ -7,7 +7,6 @@ import {
   ShieldCheck,
   VideoOff,
   Sparkles,
-  X,
 } from 'lucide-react';
 
 interface LivePhotoCaptureCardProps {
@@ -262,10 +261,6 @@ export const LivePhotoCaptureCard: React.FC<LivePhotoCaptureCardProps> = ({
   const [stream, setStream] = useState<MediaStream | null>(null);
   const [cameraActive, setCameraActive] = useState(false);
   const [cameraError, setCameraError] = useState('');
-  const [cameraDenyCount, setCameraDenyCount] = useState(0);
-  const [showPermissionModal, setShowPermissionModal] = useState(false);
-  const [isRePoppingModal, setIsRePoppingModal] = useState(false);
-  const [cameraRequesting, setCameraRequesting] = useState(false);
   const [detectionStatus, setDetectionStatus] = useState<FaceDetectionResult>({
     faceCount: 0,
     centeredInOval: false,
@@ -277,7 +272,6 @@ export const LivePhotoCaptureCard: React.FC<LivePhotoCaptureCardProps> = ({
   const detectionCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const captureCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const nativeDetectorRef = useRef<any>(null);
-  const rePopTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // Initialize native FaceDetector if supported by the browser
   useEffect(() => {
@@ -306,51 +300,19 @@ export const LivePhotoCaptureCard: React.FC<LivePhotoCaptureCardProps> = ({
 
   useEffect(() => {
     return () => {
-      if (rePopTimerRef.current) {
-        clearTimeout(rePopTimerRef.current);
-      }
       stopCamera();
     };
   }, [stopCamera]);
 
-  // If Admin turns off required photo card, close the re-popping permission modal
-  useEffect(() => {
-    if (!required && !cameraError) {
-      if (rePopTimerRef.current) {
-        clearTimeout(rePopTimerRef.current);
-        rePopTimerRef.current = null;
-      }
-      setIsRePoppingModal(false);
-    }
-  }, [required, cameraError]);
-
-  const triggerDenyRePop = useCallback(() => {
-    if (rePopTimerRef.current) {
-      clearTimeout(rePopTimerRef.current);
-    }
-    setShowPermissionModal(false);
-    setIsRePoppingModal(true);
-    setCameraDenyCount((c) => c + 1);
-    setCameraError(
-      'Camera permission was denied. Please click "Allow Camera" in the pop-up to continue.'
-    );
-    rePopTimerRef.current = setTimeout(() => {
-      setIsRePoppingModal(false);
-      setShowPermissionModal(true);
-    }, 280);
-  }, []);
-
-  const startCamera = useCallback(async () => {
+  const startCamera = async () => {
+    setCameraError('');
     setJustCaptured(false);
     if (typeof navigator === 'undefined' || !navigator.mediaDevices?.getUserMedia) {
       setCameraError(
         'Live camera API (navigator.mediaDevices.getUserMedia) is not supported in this browser.'
       );
-      triggerDenyRePop();
       return;
     }
-
-    setCameraRequesting(true);
 
     try {
       const mediaStream = await navigator.mediaDevices.getUserMedia({
@@ -363,67 +325,21 @@ export const LivePhotoCaptureCard: React.FC<LivePhotoCaptureCardProps> = ({
       });
       setStream(mediaStream);
       setCameraActive(true);
-      setCameraError('');
-      setShowPermissionModal(false);
-      setIsRePoppingModal(false);
-      setCameraRequesting(false);
-    } catch (firstErr: any) {
-      const errName = firstErr?.name || '';
-      const isPermissionDenied =
-        errName === 'NotAllowedError' ||
-        errName === 'PermissionDeniedError' ||
-        errName === 'SecurityError';
-
-      if (!isPermissionDenied) {
-        try {
-          const fallbackStream = await navigator.mediaDevices.getUserMedia({
-            video: true,
-            audio: false,
-          });
-          setStream(fallbackStream);
-          setCameraActive(true);
-          setCameraError('');
-          setShowPermissionModal(false);
-          setIsRePoppingModal(false);
-          setCameraRequesting(false);
-          return;
-        } catch {
-          // Fall through to deny re-pop
-        }
+    } catch {
+      try {
+        const fallbackStream = await navigator.mediaDevices.getUserMedia({
+          video: true,
+          audio: false,
+        });
+        setStream(fallbackStream);
+        setCameraActive(true);
+      } catch {
+        setCameraError(
+          'Unable to access live camera. Please grant camera permission in your browser to capture your Photo Card.'
+        );
       }
-
-      setCameraRequesting(false);
-      triggerDenyRePop();
     }
-  }, [triggerDenyRePop]);
-
-  // Listen for browser camera permission state changes so if granted in the browser bar, camera starts automatically
-  useEffect(() => {
-    if (!cameraError && !(required && !currentPhotoUrl && !cameraActive)) {
-      return;
-    }
-
-    let permStatus: PermissionStatus | null = null;
-    if (typeof navigator !== 'undefined' && navigator.permissions?.query) {
-      navigator.permissions
-        .query({ name: 'camera' as PermissionName })
-        .then((status) => {
-          permStatus = status;
-          status.onchange = () => {
-            if (status.state === 'granted') {
-              startCamera();
-            } else if (status.state === 'denied' && !cameraActive) {
-              triggerDenyRePop();
-            }
-          };
-        })
-        .catch(() => {});
-    }
-
-    return () => {
-      if (permStatus) permStatus.onchange = null;
-    };
-  }, [cameraError, required, currentPhotoUrl, cameraActive, startCamera, triggerDenyRePop]);
+  };
 
   useEffect(() => {
     if (videoRef.current && stream) {
@@ -603,96 +519,10 @@ export const LivePhotoCaptureCard: React.FC<LivePhotoCaptureCardProps> = ({
         )}
       </div>
 
-      {showPermissionModal && !isRePoppingModal && !cameraActive && (
-        <div className="fixed inset-0 z-[70] flex items-center justify-center bg-black/80 backdrop-blur-xs p-4">
-          <div
-            key={`photo-cam-perm-${cameraDenyCount}`}
-            className="w-full max-w-md bg-white text-black rounded-3xl border-2 border-[#0a6b3c] shadow-2xl overflow-hidden animate-in fade-in zoom-in-95 duration-200"
-          >
-            <div className="bg-[#0a6b3c] px-6 py-4 text-white flex items-center justify-between gap-3">
-              <div className="flex items-center gap-3">
-                <div className="w-10 h-10 rounded-2xl bg-white/15 border border-white/25 flex items-center justify-center shrink-0">
-                  <Camera className="w-5 h-5 text-white" />
-                </div>
-                <div>
-                  <span className="block text-[10px] font-extrabold uppercase tracking-widest text-white/80">
-                    CAMERA PERMISSION REQUIRED
-                  </span>
-                  <h3 className="text-base font-extrabold tracking-tight">
-                    Allow Camera Access to Continue
-                  </h3>
-                </div>
-              </div>
-              <button
-                type="button"
-                onClick={triggerDenyRePop}
-                className="p-1.5 rounded-xl bg-white/10 hover:bg-white/20 text-white cursor-pointer"
-                title="Close"
-              >
-                <X className="w-4 h-4" />
-              </button>
-            </div>
-
-            <div className="p-6 space-y-4">
-              <div className="p-4 rounded-2xl bg-red-50 border-2 border-red-300 text-red-900 text-xs font-bold flex items-start gap-2.5">
-                <AlertTriangle className="w-5 h-5 text-red-600 shrink-0 mt-0.5" />
-                <div className="space-y-1">
-                  <div className="text-red-800 font-extrabold uppercase tracking-wide">
-                    Camera Access Denied (Attempt #{cameraDenyCount}) — Popped Up Again!
-                  </div>
-                  <p className="font-medium text-red-700 leading-relaxed">
-                    You clicked <strong>Deny</strong>! If you clicked Deny by mistake, please click{' '}
-                    <strong className="underline text-[#0a6b3c]">Allow Camera</strong> below. This prompt will keep popping up until you accept it.
-                  </p>
-                </div>
-              </div>
-
-              <div className="grid grid-cols-2 gap-3 pt-1">
-                <button
-                  type="button"
-                  disabled={cameraRequesting}
-                  onClick={triggerDenyRePop}
-                  className="py-3.5 px-4 rounded-2xl border-2 border-neutral-300 hover:border-red-400 hover:bg-red-50/50 bg-white text-neutral-800 text-xs font-extrabold uppercase tracking-wider transition-colors cursor-pointer disabled:opacity-50"
-                >
-                  Deny
-                </button>
-                <button
-                  type="button"
-                  disabled={cameraRequesting}
-                  onClick={startCamera}
-                  className="py-3.5 px-4 rounded-2xl bg-[#0a6b3c] hover:bg-[#0e8a4e] text-white text-xs font-extrabold uppercase tracking-wider flex items-center justify-center gap-2 transition-colors cursor-pointer shadow-md disabled:opacity-60"
-                >
-                  <Camera className="w-4 h-4 shrink-0" />
-                  <span>{cameraRequesting ? 'Connecting...' : 'Allow Camera'}</span>
-                </button>
-              </div>
-            </div>
-          </div>
-        </div>
-      )}
-
       {cameraError && (
-        <div className="p-4 rounded-2xl bg-red-50 border-2 border-red-200 text-red-800 text-xs space-y-3">
-          <div className="flex items-start gap-2.5 font-bold">
-            <AlertTriangle className="w-4 h-4 shrink-0 mt-0.5 text-red-600" />
-            <div className="space-y-1">
-              <div>{cameraError}</div>
-              <p className="font-normal text-red-700 leading-relaxed">
-                Did you click &quot;Deny&quot; by mistake? Click the button below (or allow Camera in your browser&apos;s address bar icon) to open the camera prompt again.
-              </p>
-            </div>
-          </div>
-          <button
-            type="button"
-            onClick={() => {
-              setShowPermissionModal(true);
-              startCamera();
-            }}
-            className="w-full py-2.5 px-4 rounded-xl bg-[#0a6b3c] hover:bg-[#0e8a4e] text-white text-xs font-extrabold flex items-center justify-center gap-1.5 cursor-pointer shadow-xs"
-          >
-            <Camera className="w-4 h-4" />
-            <span>Request Camera Access Again</span>
-          </button>
+        <div className="p-3.5 rounded-xl bg-red-50 border border-red-200 text-red-700 text-xs font-bold flex items-start gap-2">
+          <AlertTriangle className="w-4 h-4 shrink-0 mt-0.5" />
+          <span>{cameraError}</span>
         </div>
       )}
 

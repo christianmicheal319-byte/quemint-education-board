@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useMemo, useRef, useCallback } from 'react';
+import React, { useState, useEffect, useMemo } from 'react';
 import {
   Video,
   Search,
@@ -23,11 +23,9 @@ import {
 } from 'lucide-react';
 import { Candidate, ExamResult, ExamSettings } from '../types';
 import {
-  LIVE_SESSION_ACTIVE_WINDOW_MS,
   LiveCandidateTelemetry,
   buildInitialCandidateTelemetry,
   getCandidateHdPortraitUrl,
-  getSavedLiveFramesMap,
   getSavedLiveTelemetryMap,
   publishCandidateLiveTelemetry,
   subscribeToLiveProctoring,
@@ -53,9 +51,6 @@ interface LiveVideoTileProps {
   remoteLiveFrameUrl?: string;
   seatIndex: number;
   hasSubmittedExam: boolean;
-  proctoringEnabled: boolean;
-  adminLiveStream?: MediaStream | null;
-  onToggleAdminCamera?: () => void;
   cameraViewMode: CameraViewMode;
   onChangeCameraViewMode: (mode: CameraViewMode) => void;
   isFocusedSingle: boolean;
@@ -66,6 +61,12 @@ interface LiveVideoTileProps {
 
 /**
  * JAMB CBT Official Biometric & Live CCTV Workstation Proctoring Monitor.
+ * STRICT GUARANTEES:
+ * 1. Zero cartoon / zero AI-animated swaying portraits / zero stock MP4 loops.
+ * 2. Never accesses the Admin's own local camera.
+ * 3. Displays the student's actual real-time webcam stream (`remoteLiveFrameUrl`) captured live from ExamInterface.tsx,
+ *    side-by-side with their official Registered Biometric Passport Photograph for visual identity verification (JAMB standard).
+ * 4. Strictly live stream only — zero video recording is ever saved.
  */
 const LiveCandidateVideoTile: React.FC<LiveVideoTileProps> = ({
   candidate,
@@ -73,9 +74,6 @@ const LiveCandidateVideoTile: React.FC<LiveVideoTileProps> = ({
   remoteLiveFrameUrl,
   seatIndex,
   hasSubmittedExam,
-  proctoringEnabled,
-  adminLiveStream,
-  onToggleAdminCamera,
   cameraViewMode,
   onChangeCameraViewMode,
   isFocusedSingle,
@@ -87,8 +85,6 @@ const LiveCandidateVideoTile: React.FC<LiveVideoTileProps> = ({
   const [clockTime, setClockTime] = useState<string>(() =>
     new Date().toTimeString().split(' ')[0]
   );
-  const liveVideoRef = useRef<HTMLVideoElement | null>(null);
-  const liveCanvasRef = useRef<HTMLCanvasElement | null>(null);
 
   useEffect(() => {
     const timer = setInterval(() => {
@@ -104,166 +100,16 @@ const LiveCandidateVideoTile: React.FC<LiveVideoTileProps> = ({
 
   const isTopPerformer = telemetry.accuracyPercent >= 80;
   const isRealLifeActive = Boolean(
-    telemetry.isLiveFromExamTab &&
-      Date.now() - telemetry.lastUpdated < LIVE_SESSION_ACTIVE_WINDOW_MS &&
-      !hasSubmittedExam
+    telemetry.isLiveFromExamTab && Date.now() - telemetry.lastUpdated < 15000
   );
   const hasRealLifeCameraFrame = Boolean(
-    remoteLiveFrameUrl && remoteLiveFrameUrl.length > 0 && !hasSubmittedExam
-  );
-  const isWorkstationStreamActive = Boolean(
-    proctoringEnabled && !hasSubmittedExam
+    remoteLiveFrameUrl && remoteLiveFrameUrl.length > 0
   );
   const isFocusLost = telemetry.focusStatus === 'Lost Focus Warning';
   const seatLabel = `CBT-SEAT-${String(seatIndex + 1).padStart(3, '0')}`;
 
-  useEffect(() => {
-    if (liveVideoRef.current && adminLiveStream) {
-      if (liveVideoRef.current.srcObject !== adminLiveStream) {
-        liveVideoRef.current.srcObject = adminLiveStream;
-      }
-      liveVideoRef.current.play().catch(() => {});
-    }
-  }, [adminLiveStream]);
-
-  // Real-time live workstation proctoring canvas renderer when no remote frame or hardware stream is overriding
-  useEffect(() => {
-    if (!isWorkstationStreamActive || hasRealLifeCameraFrame || adminLiveStream) return;
-    const canvas = liveCanvasRef.current;
-    if (!canvas) return;
-    const ctx = canvas.getContext('2d');
-    if (!ctx) return;
-
-    const portraitImg = new Image();
-    portraitImg.crossOrigin = 'anonymous';
-    if (candidatePortraitUrl) {
-      portraitImg.src = candidatePortraitUrl;
-    }
-
-    let scanY = 0;
-    const renderWorkstationFrame = () => {
-      const w = canvas.width;
-      const h = canvas.height;
-
-      // Dark green CBT hall background
-      const grad = ctx.createLinearGradient(0, 0, 0, h);
-      grad.addColorStop(0, '#041f11');
-      grad.addColorStop(1, '#07361e');
-      ctx.fillStyle = grad;
-      ctx.fillRect(0, 0, w, h);
-
-      // Subtle grid lines
-      ctx.strokeStyle = 'rgba(16, 185, 129, 0.08)';
-      ctx.lineWidth = 1;
-      for (let x = 0; x < w; x += 40) {
-        ctx.beginPath();
-        ctx.moveTo(x, 0);
-        ctx.lineTo(x, h);
-        ctx.stroke();
-      }
-      for (let y = 0; y < h; y += 40) {
-        ctx.beginPath();
-        ctx.moveTo(0, y);
-        ctx.lineTo(w, y);
-        ctx.stroke();
-      }
-
-      if (portraitImg.complete && portraitImg.naturalWidth > 0) {
-        ctx.save();
-        ctx.translate(w, 0);
-        ctx.scale(-1, 1);
-        ctx.drawImage(portraitImg, 0, 0, w, h);
-        ctx.restore();
-      } else {
-        // Biometric silhouette & candidate badge
-        ctx.fillStyle = 'rgba(10, 107, 60, 0.35)';
-        ctx.beginPath();
-        ctx.arc(w / 2, h / 2 - 22, 62, 0, Math.PI * 2);
-        ctx.fill();
-        ctx.strokeStyle = '#10b981';
-        ctx.lineWidth = 2.5;
-        ctx.stroke();
-
-        ctx.fillStyle = '#ffffff';
-        ctx.font = 'bold 36px sans-serif';
-        ctx.textAlign = 'center';
-        ctx.textBaseline = 'middle';
-        const initials = `${(candidate.firstName || 'C')[0]}${(candidate.surname || 'A')[0]}`.toUpperCase();
-        ctx.fillText(initials, w / 2, h / 2 - 22);
-
-        ctx.fillStyle = '#d1fae5';
-        ctx.font = 'bold 14px monospace';
-        ctx.fillText(
-          `${telemetry.candidateName} (${telemetry.regNumber})`,
-          w / 2,
-          h / 2 + 56
-        );
-        ctx.fillStyle = '#6ee7b7';
-        ctx.font = 'bold 11px monospace';
-        ctx.fillText(
-          `${seatLabel} • ${telemetry.currentSubject} Q${telemetry.currentQuestionIndex}/${telemetry.totalQuestions} • ${telemetry.accuracyPercent}% ACC`,
-          w / 2,
-          h / 2 + 76
-        );
-      }
-
-      // Corner biometric target brackets
-      const bLen = 22;
-      const pad = 44;
-      ctx.strokeStyle = 'rgba(52, 211, 153, 0.65)';
-      ctx.lineWidth = 2;
-      // Top-left
-      ctx.beginPath();
-      ctx.moveTo(pad, pad + bLen);
-      ctx.lineTo(pad, pad);
-      ctx.lineTo(pad + bLen, pad);
-      ctx.stroke();
-      // Top-right
-      ctx.beginPath();
-      ctx.moveTo(w - pad - bLen, pad);
-      ctx.lineTo(w - pad, pad);
-      ctx.lineTo(w - pad, pad + bLen);
-      ctx.stroke();
-      // Bottom-left
-      ctx.beginPath();
-      ctx.moveTo(pad, h - pad - bLen);
-      ctx.lineTo(pad, h - pad);
-      ctx.lineTo(pad + bLen, h - pad);
-      ctx.stroke();
-      // Bottom-right
-      ctx.beginPath();
-      ctx.moveTo(w - pad - bLen, h - pad);
-      ctx.lineTo(w - pad, h - pad);
-      ctx.lineTo(w - pad, h - pad - bLen);
-      ctx.stroke();
-
-      // Subtle moving CCTV scanline
-      scanY = (scanY + 6) % h;
-      ctx.fillStyle = 'rgba(52, 211, 153, 0.09)';
-      ctx.fillRect(0, scanY, w, 3);
-    };
-
-    renderWorkstationFrame();
-    const interval = setInterval(renderWorkstationFrame, 120);
-    return () => clearInterval(interval);
-  }, [
-    isWorkstationStreamActive,
-    hasRealLifeCameraFrame,
-    adminLiveStream,
-    candidatePortraitUrl,
-    candidate.firstName,
-    candidate.surname,
-    telemetry.candidateName,
-    telemetry.regNumber,
-    telemetry.currentSubject,
-    telemetry.currentQuestionIndex,
-    telemetry.totalQuestions,
-    telemetry.accuracyPercent,
-    seatLabel,
-  ]);
-
   const formatRemainingTime = (secs?: number) => {
-    if (typeof secs !== 'number' || secs < 0) return '38:45';
+    if (typeof secs !== 'number' || secs < 0) return '--:--';
     const mins = Math.floor(secs / 60);
     const rem = secs % 60;
     return `${String(mins).padStart(2, '0')}:${String(rem).padStart(2, '0')}`;
@@ -282,7 +128,7 @@ const LiveCandidateVideoTile: React.FC<LiveVideoTileProps> = ({
   return (
     <div
       className={`rounded-2xl border-2 overflow-hidden bg-white transition-all shadow-xs flex flex-col justify-between ${
-        isFocusLost && (isRealLifeActive || isWorkstationStreamActive)
+        isFocusLost && isRealLifeActive
           ? 'border-red-600 ring-4 ring-red-600/20'
           : isRealLifeActive
           ? 'border-emerald-600 ring-4 ring-emerald-500/20'
@@ -300,14 +146,10 @@ const LiveCandidateVideoTile: React.FC<LiveVideoTileProps> = ({
           <span className="font-mono text-xs font-extrabold text-white tracking-tight">
             REG: {telemetry.regNumber}
           </span>
-          {isRealLifeActive || isWorkstationStreamActive ? (
+          {isRealLifeActive ? (
             <span className="px-2 py-0.5 rounded bg-red-600 text-white text-[10px] font-extrabold uppercase tracking-wider flex items-center gap-1.5">
               <span className="w-2 h-2 rounded-full bg-white animate-ping" />
-              <span>
-                {hasRealLifeCameraFrame || adminLiveStream
-                  ? 'LIVE CCTV FEED ACTIVE'
-                  : 'LIVE WORKSTATION FEED'}
-              </span>
+              <span>LIVE CCTV FEED ACTIVE</span>
             </span>
           ) : hasSubmittedExam ? (
             <span className="px-2 py-0.5 rounded bg-emerald-900/80 text-emerald-300 border border-emerald-600/40 text-[10px] font-extrabold uppercase">
@@ -315,7 +157,7 @@ const LiveCandidateVideoTile: React.FC<LiveVideoTileProps> = ({
             </span>
           ) : (
             <span className="px-2 py-0.5 rounded bg-neutral-800 text-neutral-300 border border-neutral-700 text-[10px] font-extrabold uppercase">
-              PROCTORING PAUSED
+              WORKSTATION STANDBY
             </span>
           )}
         </div>
@@ -384,7 +226,7 @@ const LiveCandidateVideoTile: React.FC<LiveVideoTileProps> = ({
             : 'relative aspect-video'
         }`}
       >
-        {/* LEFT / MAIN PANEL: REAL-TIME CANDIDATE LIVE WEBCAM FEED OR LIVE WORKSTATION STREAM */}
+        {/* LEFT / MAIN PANEL: REAL-TIME CANDIDATE LIVE WEBCAM FEED OR WORKSTATION STANDBY */}
         <div
           className={`relative bg-neutral-950 overflow-hidden flex items-center justify-center ${
             cameraViewMode === 'jamb-biometric-split'
@@ -392,24 +234,14 @@ const LiveCandidateVideoTile: React.FC<LiveVideoTileProps> = ({
               : 'w-full h-full'
           }`}
         >
-          {hasRealLifeCameraFrame || (isWorkstationStreamActive && adminLiveStream) ? (
-            /* REAL-TIME LIVE STUDENT WEBCAM STREAM OR CONNECTED HARDWARE STREAM */
+          {hasRealLifeCameraFrame ? (
+            /* AUTHENTIC REAL-TIME LIVE STUDENT WEBCAM STREAM (Zero AI / Zero Cartoon / Zero Stock Video) */
             <>
-              {hasRealLifeCameraFrame ? (
-                <img
-                  src={remoteLiveFrameUrl}
-                  alt={`${telemetry.candidateName} Live CBT Webcam`}
-                  className="w-full h-full object-cover"
-                />
-              ) : (
-                <video
-                  ref={liveVideoRef}
-                  autoPlay
-                  playsInline
-                  muted
-                  className="w-full h-full object-cover -scale-x-100"
-                />
-              )}
+              <img
+                src={remoteLiveFrameUrl}
+                alt={`${telemetry.candidateName} Live CBT Webcam`}
+                className="w-full h-full object-cover"
+              />
 
               {/* Top-left CCTV OSD */}
               <div className="absolute top-2.5 left-2.5 z-10 flex flex-wrap items-center gap-1.5">
@@ -472,91 +304,35 @@ const LiveCandidateVideoTile: React.FC<LiveVideoTileProps> = ({
                   </span>
                 </div>
                 <div className="flex items-center gap-2">
-                  <span className="px-1.5 py-0.5 rounded bg-emerald-950 text-emerald-300 border border-emerald-500/40 font-extrabold">
-                    TIME LEFT: {formattedTimeLeft}
-                  </span>
-                </div>
-              </div>
-            </>
-          ) : isWorkstationStreamActive ? (
-            /* ACTIVE LIVE CBT WORKSTATION PROCTORING FEED CANVAS */
-            <>
-              <canvas
-                ref={liveCanvasRef}
-                width={640}
-                height={360}
-                className="w-full h-full object-cover"
-              />
-
-              {/* Top-left Live Workstation OSD */}
-              <div className="absolute top-2.5 left-2.5 z-10 flex flex-wrap items-center gap-1.5">
-                <span className="px-2 py-0.5 rounded bg-red-600/95 text-white font-mono text-[10px] font-extrabold uppercase tracking-wider flex items-center gap-1.5 shadow-sm">
-                  <span className="w-2 h-2 rounded-full bg-white animate-ping" />
-                  <span>LIVE CBT WORKSTATION • {telemetry.candidateName}</span>
-                </span>
-                <span className="px-2 py-0.5 rounded bg-black/80 text-emerald-400 border border-emerald-500/40 font-mono text-[10px] font-bold flex items-center gap-1">
-                  <Wifi className="w-3 h-3" />
-                  <span>PROCTOR STREAM ONLINE</span>
-                </span>
-              </div>
-
-              {/* Quick action buttons in top-right of viewport */}
-              <div className="absolute top-2.5 right-2.5 z-10 flex items-center gap-1.5">
-                {onToggleAdminCamera && (
-                  <button
-                    type="button"
-                    onClick={onToggleAdminCamera}
-                    className="px-2.5 py-1 rounded-lg bg-[#0a6b3c] hover:bg-[#085a32] text-white border border-emerald-400/50 text-[10px] font-extrabold flex items-center gap-1 shadow-md cursor-pointer"
-                    title="Connect live hardware webcam feed"
-                  >
-                    <Camera className="w-3 h-3" />
-                    <span>Connect Webcam</span>
-                  </button>
-                )}
-                <button
-                  type="button"
-                  onClick={handleCopyRegNo}
-                  className="px-2 py-1 rounded-lg bg-black/80 hover:bg-black text-white border border-white/20 text-[10px] font-mono font-bold flex items-center gap-1 cursor-pointer"
-                  title="Copy Candidate Reg Number"
-                >
-                  {copiedReg ? (
-                    <>
-                      <Check className="w-3 h-3 text-emerald-400" />
-                      <span className="text-emerald-400">Copied</span>
-                    </>
-                  ) : (
-                    <>
-                      <Copy className="w-3 h-3 text-neutral-300" />
-                      <span>{telemetry.regNumber}</span>
-                    </>
+                  {formattedTimeLeft !== '--:--' && (
+                    <span className="px-1.5 py-0.5 rounded bg-emerald-950 text-emerald-300 border border-emerald-500/40 font-extrabold">
+                      TIME LEFT: {formattedTimeLeft}
+                    </span>
                   )}
-                </button>
-              </div>
-
-              {/* Bottom CCTV Telemetry Overlay Bar */}
-              <div className="absolute bottom-0 inset-x-0 bg-black/85 border-t border-white/15 px-3 py-1.5 flex flex-wrap items-center justify-between gap-2 text-[10px] font-mono text-white">
-                <div className="flex items-center gap-2">
-                  <span className="text-emerald-400 font-extrabold">
-                    SUBJ: {telemetry.currentSubject}
-                  </span>
-                  <span>•</span>
-                  <span>
-                    Q{telemetry.currentQuestionIndex}/{telemetry.totalQuestions}
-                  </span>
-                  <span>•</span>
-                  <span>
-                    ANS: {telemetry.answeredCount}/{telemetry.totalQuestions}
-                  </span>
-                </div>
-                <div className="flex items-center gap-2">
-                  <span className="px-1.5 py-0.5 rounded bg-emerald-950 text-emerald-300 border border-emerald-500/40 font-extrabold">
-                    TIME LEFT: {formattedTimeLeft}
-                  </span>
                 </div>
               </div>
             </>
+          ) : isRealLifeActive ? (
+            /* Candidate is logged into the Exam Portal right now, waiting for camera permission or frame */
+            <div className="p-5 text-center space-y-3 max-w-md">
+              <div className="w-12 h-12 rounded-2xl bg-emerald-950 border border-emerald-500/40 text-emerald-400 flex items-center justify-center mx-auto">
+                <Camera className="w-6 h-6 animate-pulse" />
+              </div>
+              <div className="space-y-1">
+                <div className="text-xs font-mono font-extrabold uppercase tracking-wider text-emerald-400">
+                  CBT WORKSTATION ONLINE • INITIALIZING WEBCAM
+                </div>
+                <p className="text-[11px] text-neutral-300 leading-relaxed">
+                  <strong>{telemetry.candidateName}</strong> ({telemetry.regNumber}) is currently logged into the CBT Portal (Stage:{' '}
+                  <span className="text-white font-mono uppercase">
+                    {telemetry.examStage || 'active'}
+                  </span>
+                  ). Waiting for browser webcam frame...
+                </p>
+              </div>
+            </div>
           ) : (
-            /* Workstation Closed / Exam Completed or Proctoring Paused */
+            /* Authentic JAMB CBT Workstation Standby Screen (When student is not currently logged into an active exam session) */
             <div className="p-5 w-full h-full flex flex-col items-center justify-center text-center space-y-3 bg-neutral-950">
               <div className="flex items-center gap-3 bg-neutral-900/90 border border-neutral-800 rounded-2xl p-3 max-w-sm w-full text-left">
                 <div className="w-14 h-14 rounded-xl overflow-hidden border-2 border-neutral-700 bg-white shrink-0">
@@ -574,7 +350,7 @@ const LiveCandidateVideoTile: React.FC<LiveVideoTileProps> = ({
                     <span className="text-[10px] font-mono font-extrabold uppercase tracking-wider text-amber-300">
                       {hasSubmittedExam
                         ? 'WORKSTATION CLOSED • EXAM COMPLETED'
-                        : 'PROCTORING PAUSED BY ADMIN'}
+                        : 'CCTV STANDBY • NO ACTIVE CAMERA SIGNAL'}
                     </span>
                   </div>
                   <div className="text-xs font-extrabold text-white truncate">
@@ -589,8 +365,29 @@ const LiveCandidateVideoTile: React.FC<LiveVideoTileProps> = ({
               <p className="text-[11px] text-neutral-400 max-w-sm leading-relaxed">
                 {hasSubmittedExam
                   ? 'This candidate has submitted their CBT examination. Live webcam stream has ended.'
-                  : 'Live Proctoring is currently paused. Click "Proctoring: PAUSED" above to resume live feeds.'}
+                  : 'Candidate is not currently logged into an active CBT session. When they log in with their Reg Number below, their real-life webcam streams here automatically.'}
               </p>
+
+              <div className="flex flex-wrap items-center justify-center gap-2">
+                <button
+                  type="button"
+                  onClick={handleCopyRegNo}
+                  className="px-3 py-1.5 rounded-xl bg-neutral-900 hover:bg-neutral-800 text-white border border-neutral-700 text-[11px] font-mono font-extrabold flex items-center gap-1.5 cursor-pointer transition-colors"
+                  title="Copy Candidate Registration Number to log in on a student tab or device"
+                >
+                  {copiedReg ? (
+                    <>
+                      <Check className="w-3.5 h-3.5 text-emerald-400" />
+                      <span className="text-emerald-400">Copied: {telemetry.regNumber}</span>
+                    </>
+                  ) : (
+                    <>
+                      <Copy className="w-3.5 h-3.5 text-neutral-400" />
+                      <span>Copy Reg No: {telemetry.regNumber}</span>
+                    </>
+                  )}
+                </button>
+              </div>
             </div>
           )}
         </div>
@@ -641,16 +438,10 @@ const LiveCandidateVideoTile: React.FC<LiveVideoTileProps> = ({
                 <span className="text-neutral-400">CCTV Feed:</span>
                 <span
                   className={`font-extrabold ${
-                    hasRealLifeCameraFrame || isWorkstationStreamActive
-                      ? 'text-emerald-400'
-                      : 'text-amber-400'
+                    hasRealLifeCameraFrame ? 'text-emerald-400' : 'text-amber-400'
                   }`}
                 >
-                  {hasRealLifeCameraFrame || adminLiveStream
-                    ? 'LIVE WEBCAM'
-                    : isWorkstationStreamActive
-                    ? 'LIVE STREAM'
-                    : 'CLOSED'}
+                  {hasRealLifeCameraFrame ? 'LIVE WEBCAM' : 'STANDBY'}
                 </span>
               </div>
               <div className="flex items-center justify-between">
@@ -842,46 +633,10 @@ export const LiveProctoringPanel: React.FC<LiveProctoringPanelProps> = ({
       )
   );
 
-  // Live candidate webcam frames received from ExamInterface.tsx (via localStorage, BroadcastChannel, SSE, or /api/proctoring/feeds)
+  // Live candidate webcam frames received from ExamInterface.tsx (via BroadcastChannel, SSE, or /api/proctoring/feeds)
   const [remoteCandidateFrames, setRemoteCandidateFrames] = useState<
     Record<string, string>
-  >(() => getSavedLiveFramesMap());
-
-  // Optional live hardware webcam stream when Admin clicks "Connect Webcam" to test live CCTV directly
-  const [adminTestCameraStream, setAdminTestCameraStream] = useState<MediaStream | null>(
-    null
-  );
-
-  const handleToggleAdminTestCamera = useCallback(async () => {
-    if (adminTestCameraStream) {
-      adminTestCameraStream.getTracks().forEach((t) => t.stop());
-      setAdminTestCameraStream(null);
-      return;
-    }
-    if (
-      typeof navigator !== 'undefined' &&
-      navigator.mediaDevices &&
-      typeof navigator.mediaDevices.getUserMedia === 'function'
-    ) {
-      try {
-        const stream = await navigator.mediaDevices.getUserMedia({
-          video: { facingMode: 'user', width: { ideal: 640 }, height: { ideal: 480 } },
-          audio: false,
-        });
-        setAdminTestCameraStream(stream);
-      } catch {
-        // Ignore if hardware camera unavailable
-      }
-    }
-  }, [adminTestCameraStream]);
-
-  useEffect(() => {
-    return () => {
-      if (adminTestCameraStream) {
-        adminTestCameraStream.getTracks().forEach((t) => t.stop());
-      }
-    };
-  }, [adminTestCameraStream]);
+  >({});
 
   // Filter toggle: 'all' vs 'real-life-only'
   const [feedSourceFilter, setFeedSourceFilter] = useState<'all' | 'real-life-only'>('all');
@@ -893,12 +648,7 @@ export const LiveProctoringPanel: React.FC<LiveProctoringPanelProps> = ({
   const realTimeActiveCandidateIds = useMemo(() => {
     const now = Date.now();
     return Object.values(telemetryMap)
-      .filter(
-        (t) =>
-          t &&
-          t.isLiveFromExamTab &&
-          now - t.lastUpdated < LIVE_SESSION_ACTIVE_WINDOW_MS
-      )
+      .filter((t) => t && t.isLiveFromExamTab && now - t.lastUpdated < 15000)
       .map((t) => t.candidateId);
   }, [telemetryMap]);
 
@@ -1115,7 +865,7 @@ export const LiveProctoringPanel: React.FC<LiveProctoringPanelProps> = ({
   const [focusedSingleCandidateId, setFocusedSingleCandidateId] = useState<string | null>(
     null
   );
-  const [autoSimulateLiveSession, setAutoSimulateLiveSession] = useState<boolean>(true);
+  const [autoSimulateLiveSession, setAutoSimulateLiveSession] = useState<boolean>(false);
   const [transitionBanner, setTransitionBanner] = useState<string>('');
 
   // Automatically pin any real-life active student to the front of the Admin's Watch Stage
@@ -1439,24 +1189,7 @@ export const LiveProctoringPanel: React.FC<LiveProctoringPanelProps> = ({
               </button>
             </div>
 
-            {/* Connect Live Webcam Button for Direct Admin Hall Camera Feed */}
-            <button
-              type="button"
-              onClick={handleToggleAdminTestCamera}
-              className={`px-3.5 py-2 rounded-xl border text-xs font-extrabold flex items-center gap-1.5 transition-colors cursor-pointer ${
-                adminTestCameraStream
-                  ? 'border-red-600 bg-red-600 text-white'
-                  : 'border-[#0a6b3c] bg-[#0a6b3c]/10 text-[#0a6b3c] hover:bg-[#0a6b3c] hover:text-white'
-              }`}
-              title="Connect live browser webcam feed to monitored workstations"
-            >
-              <Camera className="w-3.5 h-3.5" />
-              <span>
-                {adminTestCameraStream ? 'Disconnect Live Camera' : 'Connect Live Camera'}
-              </span>
-            </button>
-
-            {/* Live Hall Threshold Simulation Toggle */}
+            {/* Optional Threshold Simulation Toggle (OFF by default) */}
             <button
               type="button"
               onClick={() => setAutoSimulateLiveSession((prev) => !prev)}
@@ -1465,17 +1198,17 @@ export const LiveProctoringPanel: React.FC<LiveProctoringPanelProps> = ({
                   ? 'border-[#0a6b3c] bg-[#0a6b3c]/10 text-[#0a6b3c]'
                   : 'border-neutral-300 bg-neutral-100 text-neutral-700'
               }`}
-              title="Toggle automatic live question & threshold progression for monitored workstations"
+              title="Toggle automatic threshold split test for standby workstations"
             >
               {autoSimulateLiveSession ? (
                 <>
                   <Pause className="w-3.5 h-3.5" />
-                  <span>Live Hall Progression: ON</span>
+                  <span>Auto Split Test: ON</span>
                 </>
               ) : (
                 <>
                   <Play className="w-3.5 h-3.5" />
-                  <span>Live Hall Progression: OFF</span>
+                  <span>Auto Split Test: OFF</span>
                 </>
               )}
             </button>
@@ -1745,9 +1478,6 @@ export const LiveProctoringPanel: React.FC<LiveProctoringPanelProps> = ({
                   remoteLiveFrameUrl={remoteCandidateFrames[candidate.id]}
                   seatIndex={seatIndex}
                   hasSubmittedExam={hasSubmittedExam}
-                  proctoringEnabled={settings.proctoringEnabled !== false}
-                  adminLiveStream={adminTestCameraStream}
-                  onToggleAdminCamera={handleToggleAdminTestCamera}
                   cameraViewMode={cameraViewMode}
                   onChangeCameraViewMode={setCameraViewMode}
                   isFocusedSingle={focusedSingleCandidateId === candidate.id}

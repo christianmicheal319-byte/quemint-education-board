@@ -51,11 +51,6 @@ import {
   isExamRankingPublished,
   resolveResultSlipFieldRows,
 } from './utils/pdfSlipGenerator';
-import {
-  downloadAttemptWithAiExplanationsExcelCsv,
-  downloadAttemptWithAiExplanationsPdf,
-  resolveAttemptedItemsForResult,
-} from './utils/tyaEvaluator';
 import { getCandidateHdPortraitUrl } from './utils/liveProctoringBus';
 
 type AppView = 'login' | 'registration' | 'exam' | 'result' | 'admin';
@@ -96,13 +91,7 @@ export default function App() {
   const [questions, setQuestions] = useState<Question[]>(() => {
     try {
       const saved = localStorage.getItem('quemint_questions_v4');
-      if (saved) {
-        const parsed: Question[] = JSON.parse(saved);
-        const existingIds = new Set(parsed.map((q) => q.id));
-        const missingInitial = INITIAL_QUESTIONS.filter((q) => !existingIds.has(q.id));
-        return missingInitial.length > 0 ? [...parsed, ...missingInitial] : parsed;
-      }
-      return INITIAL_QUESTIONS;
+      return saved ? JSON.parse(saved) : INITIAL_QUESTIONS;
     } catch {
       return INITIAL_QUESTIONS;
     }
@@ -111,28 +100,11 @@ export default function App() {
   const [results, setResults] = useState<ExamResult[]>(() => {
     try {
       const saved = localStorage.getItem('quemint_results_v4');
-      if (saved) {
-        const parsed: ExamResult[] = JSON.parse(saved);
-        return parsed.map((r) => {
-          const initialMatch = INITIAL_RESULTS.find((ir) => ir.id === r.id);
-          if (
-            initialMatch?.attemptedRecord &&
-            (!r.attemptedRecord || r.attemptedRecord.length === 0)
-          ) {
-            return { ...r, attemptedRecord: initialMatch.attemptedRecord };
-          }
-          return r;
-        });
-      }
-      return INITIAL_RESULTS;
+      return saved ? JSON.parse(saved) : INITIAL_RESULTS;
     } catch {
       return INITIAL_RESULTS;
     }
   });
-
-  const [expandedResultAiExplanations, setExpandedResultAiExplanations] = useState<
-    Record<string, boolean>
-  >({});
 
   const [settings, setSettings] = useState<ExamSettings>(() => {
     try {
@@ -266,22 +238,12 @@ export default function App() {
 
       skipNextServerPushRef.current = true;
       if (Array.isArray(remoteState.candidates) && remoteState.candidates.length > 0) {
-        setCandidates((prev) => {
-          const remoteNormalized: Candidate[] = remoteState.candidates.map((c: Candidate) => ({
+        setCandidates(
+          remoteState.candidates.map((c: Candidate) => ({
             ...c,
-            category: normalizeCategoryName(c.category),
             passportDataUrl: getCandidateHdPortraitUrl(c),
-          }));
-          const remoteIds = new Set(remoteNormalized.map((c) => c.id));
-          const localOnly = prev.filter((c) => c && c.id && !remoteIds.has(c.id));
-          const merged = localOnly.length > 0 ? [...localOnly, ...remoteNormalized] : remoteNormalized;
-          try {
-            localStorage.setItem('quemint_candidates_v4', JSON.stringify(merged));
-          } catch {
-            // ignore
-          }
-          return merged;
-        });
+          }))
+        );
       }
       if (Array.isArray(remoteState.questions) && remoteState.questions.length > 0) {
         setQuestions(remoteState.questions);
@@ -569,72 +531,42 @@ export default function App() {
     eventTitle?: string,
     eventMsg?: string
   ) => {
-    const normalizedCand: Candidate = {
-      ...cand,
-      category: normalizeCategoryName(cand.category),
-      passportDataUrl: getCandidateHdPortraitUrl(cand),
-    };
-    localMutationLockUntilRef.current = Date.now() + 6000;
-    skipNextServerPushRef.current = false;
-
     setCandidates((prev) => {
-      const exists = prev.some((c) => c.id === normalizedCand.id);
-      const nextList = exists
-        ? prev.map((c) => (c.id === normalizedCand.id ? normalizedCand : c))
-        : [normalizedCand, ...prev];
-      try {
-        localStorage.setItem('quemint_candidates_v4', JSON.stringify(nextList));
-      } catch {
-        // ignore quota errors
+      const exists = prev.some((c) => c.id === cand.id);
+      if (exists) {
+        return prev.map((c) => (c.id === cand.id ? cand : c));
       }
-      fetch('/api/candidates/register', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ candidate: normalizedCand }),
-      })
-        .then((r) => r.json())
-        .then((d) => {
-          if (d?.state?.updatedAt) {
-            lastAppliedServerTimestampRef.current = Math.max(
-              lastAppliedServerTimestampRef.current,
-              d.state.updatedAt
-            );
-          }
-        })
-        .catch(() => {});
-      return nextList;
+      return [cand, ...prev];
     });
     setResults((prev) => {
       const hasMatch = prev.some(
         (r) =>
-          r.candidateId === normalizedCand.id ||
-          (normalizedCand.regNumber &&
-            r.regNumber.trim().toUpperCase() ===
-              normalizedCand.regNumber.trim().toUpperCase())
+          r.candidateId === cand.id ||
+          (cand.regNumber &&
+            r.regNumber.trim().toUpperCase() === cand.regNumber.trim().toUpperCase())
       );
       if (!hasMatch) return prev;
       return prev.map((r) =>
-        r.candidateId === normalizedCand.id ||
-        (normalizedCand.regNumber &&
-          r.regNumber.trim().toUpperCase() ===
-            normalizedCand.regNumber.trim().toUpperCase())
+        r.candidateId === cand.id ||
+        (cand.regNumber &&
+          r.regNumber.trim().toUpperCase() === cand.regNumber.trim().toUpperCase())
           ? {
               ...r,
-              category: normalizedCand.category,
-              gender: normalizedCand.gender,
-              courseOfStudy: normalizedCand.courseOfStudy || r.courseOfStudy,
-              stateOfOrigin: normalizedCand.stateOfOrigin || r.stateOfOrigin,
-              examCenterName: normalizedCand.examCenterName || r.examCenterName,
-              regNumber: normalizedCand.regNumber || r.regNumber,
-              candidateName: `${normalizedCand.firstName} ${
-                normalizedCand.middleName ? normalizedCand.middleName + ' ' : ''
-              }${normalizedCand.surname}`.trim(),
+              category: cand.category,
+              gender: cand.gender,
+              courseOfStudy: cand.courseOfStudy || r.courseOfStudy,
+              stateOfOrigin: cand.stateOfOrigin || r.stateOfOrigin,
+              examCenterName: cand.examCenterName || r.examCenterName,
+              regNumber: cand.regNumber || r.regNumber,
+              candidateName: `${cand.firstName} ${
+                cand.middleName ? cand.middleName + ' ' : ''
+              }${cand.surname}`.trim(),
             }
           : r
       );
     });
     if (eventTitle && eventMsg) {
-      addNotification(eventTitle, eventMsg, normalizedCand.pin ? 'pin' : 'payment');
+      addNotification(eventTitle, eventMsg, cand.pin ? 'pin' : 'payment');
     }
   };
 
@@ -793,10 +725,6 @@ export default function App() {
     downloadCandidateQuestionsPdf(res, settings, questions);
   };
 
-  const handleDownloadAttemptedExcel = (res: ExamResult) => {
-    downloadAttemptWithAiExplanationsExcelCsv(res, questions);
-  };
-
   // Render Registration View
   if (view === 'registration') {
     const isRegistrationOpen = settings.registrationOpen ?? true;
@@ -810,7 +738,6 @@ export default function App() {
             activeCandidateId={activeRegCandidateId}
             onSetActiveCandidateId={setActiveRegCandidateId}
             onRegisterOrUpdateCandidate={handleRegisterOrUpdateCandidate}
-            onUpdateSettings={setSettings}
             onBackToLogin={() => {
               setRegInput('');
               setView('login');
@@ -1390,151 +1317,16 @@ export default function App() {
                     </strong>
                   </div>
                 </div>
-                <div className="flex flex-wrap items-center gap-2 shrink-0">
-                  <button
-                    type="button"
-                    onClick={() => handleDownloadAttemptedQuestions(activeExamResult)}
-                    className="px-3.5 py-2 rounded-xl border border-[#0a6b3c] text-[#0a6b3c] hover:bg-[#0a6b3c]/10 text-xs font-extrabold flex items-center gap-1.5 cursor-pointer"
-                  >
-                    <Download className="w-3.5 h-3.5" />
-                    <span>Download Questions PDF</span>
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => setShowResultSlipOverlay(true)}
-                    className="px-4 py-2 rounded-xl bg-[#0a6b3c]/10 text-[#0a6b3c] text-xs font-extrabold cursor-pointer"
-                  >
-                    Open Slip
-                  </button>
-                </div>
+                <button
+                  type="button"
+                  onClick={() => setShowResultSlipOverlay(true)}
+                  className="px-4 py-2 rounded-xl bg-[#0a6b3c]/10 text-[#0a6b3c] text-xs font-extrabold cursor-pointer shrink-0"
+                >
+                  Open Slip
+                </button>
               </div>
             </div>
           </div>
-
-          {/* Questions With Official Answers Card (Matches Downloaded PDF: Just ✅ on correct MCQ options & Answer Key beneath TYA, no scoring/psychometric) */}
-          {(() => {
-            const attemptedItems = resolveAttemptedItemsForResult(
-              activeExamResult,
-              questions
-            );
-            if (attemptedItems.length === 0) return null;
-            return (
-              <div className="rounded-3xl bg-white border border-neutral-200 p-6 shadow-xs space-y-4">
-                <div className="flex flex-wrap items-center justify-between gap-2 border-b border-neutral-200 pb-4">
-                  <div>
-                    <h2 className="text-base font-extrabold text-black">
-                      Questions &amp; Official Answer Keys
-                    </h2>
-                    <p className="text-xs text-neutral-500">
-                      Correct MCQ options are marked with ✅ and TYA questions display the examiner Answer Key beneath each question.
-                    </p>
-                  </div>
-                  <div className="flex flex-wrap items-center gap-2">
-                    <button
-                      type="button"
-                      onClick={() =>
-                        downloadCandidateQuestionsPdf(
-                          activeExamResult,
-                          {
-                            ...settings,
-                            downloadMode: 'Download total questions attempted',
-                          },
-                          questions
-                        )
-                      }
-                      className="px-3.5 py-2 rounded-xl bg-[#0a6b3c] hover:bg-[#0e8a4e] text-white text-xs font-extrabold flex items-center gap-1.5 cursor-pointer"
-                    >
-                      <Download className="w-3.5 h-3.5" />
-                      <span>Download Attempted Questions</span>
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() =>
-                        downloadCandidateQuestionsPdf(
-                          activeExamResult,
-                          {
-                            ...settings,
-                            downloadMode: 'Download failed questions only',
-                          },
-                          questions
-                        )
-                      }
-                      className="px-3.5 py-2 rounded-xl border border-[#0a6b3c] text-[#0a6b3c] hover:bg-[#0a6b3c]/10 text-xs font-extrabold flex items-center gap-1.5 cursor-pointer"
-                    >
-                      <Download className="w-3.5 h-3.5" />
-                      <span>Download Missed Questions</span>
-                    </button>
-                  </div>
-                </div>
-
-                <div className="space-y-4 max-h-[540px] overflow-y-auto pr-1">
-                  {attemptedItems.map((item, idx) => {
-                    const isTya = item.questionType === 'TYA';
-                    const officialKey = isTya
-                      ? (item.answerKeys && item.answerKeys.length > 0
-                          ? item.answerKeys
-                          : [item.options?.[0] || '—']
-                        ).join(' | ')
-                      : '';
-                    const letters = ['A', 'B', 'C', 'D'];
-
-                    return (
-                      <div
-                        key={`${item.id}-${idx}`}
-                        className="p-4 rounded-2xl border border-neutral-200 bg-white text-xs space-y-2"
-                      >
-                        <div className="text-[11px] font-extrabold text-[#0a6b3c]">
-                          Category: {item.subject}
-                        </div>
-                        <div className="font-normal text-black text-sm leading-relaxed">
-                          <span className="font-semibold mr-1.5">{idx + 1}.</span>
-                          {item.questionText}
-                        </div>
-
-                        {isTya ? (
-                          <div className="pl-4 pt-1">
-                            <span className="font-extrabold text-black text-xs">
-                              Answer Key: {officialKey}{' '}
-                              <span className="text-[#16a34a] font-extrabold">✓</span>
-                            </span>
-                          </div>
-                        ) : (
-                          <div className="pl-4 space-y-1 pt-0.5">
-                            <div className="font-extrabold text-[11px] text-neutral-900">
-                              Options:
-                            </div>
-                            <div className="pl-2 space-y-1">
-                              {(item.options || []).map((optText, oIdx) => {
-                                const isCorrectOpt = oIdx === item.correctAnswer;
-                                return (
-                                  <div
-                                    key={oIdx}
-                                    className={
-                                      isCorrectOpt
-                                        ? 'font-extrabold text-black'
-                                        : 'font-normal text-neutral-700'
-                                    }
-                                  >
-                                    {letters[oIdx] || String.fromCharCode(65 + oIdx)}.{' '}
-                                    {optText}{' '}
-                                    {isCorrectOpt && (
-                                      <span className="text-[#16a34a] font-extrabold ml-1">
-                                        ✓
-                                      </span>
-                                    )}
-                                  </div>
-                                );
-                              })}
-                            </div>
-                          </div>
-                        )}
-                      </div>
-                    );
-                  })}
-                </div>
-              </div>
-            );
-          })()}
         </div>
 
         {/* FOREGROUND RESULT MODAL (Matches Reference Screenshot 2 in Quemint Green & White) */}

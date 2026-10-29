@@ -1,424 +1,345 @@
 import { Candidate, ExamResult } from '../types';
 
-export const LIVE_SESSION_ACTIVE_WINDOW_MS = 35000;
-
 export interface LiveCandidateTelemetry {
   candidateId: string;
   regNumber: string;
   candidateName: string;
   category: string;
-  gender: 'Male' | 'Female';
+  gender: string;
+  passportDataUrl?: string;
+  testTitle: string;
+  testCode: string;
   currentSubject: string;
   currentQuestionIndex: number;
   totalQuestions: number;
   answeredCount: number;
   correctCount: number;
-  wrongCount?: number;
-  accuracyPercent: number;
-  currentStreakType?: 'pass' | 'fail' | 'none';
-  currentStreakCount?: number;
-  timeRemainingSeconds?: number;
-  timeLeftSeconds: number;
-  cameraConnected?: boolean;
-  cameraActive?: boolean;
-  cameraLabel?: string;
-  faceVerified?: boolean;
-  focusStatus?: 'Focused' | 'Tab Switched' | string;
-  securityFlags?: number;
-  status?: 'Active' | 'Submitted' | 'Idle';
-  isLiveFromExamTab?: boolean;
-  passportDataUrl?: string;
-  lastTransition?: 'promoted-to-top' | 'dropped-below-80' | 'none';
-  lastTransitionAt?: number;
-  lastUpdated: number;
+  accuracyPercent: number; // 0 to 100
+  focusStatus: 'Focused' | 'Lost Focus Warning';
+  cameraActive: boolean;
+  isLiveFromExamTab: boolean;
+  examStage?: string;
+  timeLeftSeconds?: number;
   senderDeviceId?: string;
+  lastUpdated: number;
+  lastTransition?: 'promoted-to-top' | 'dropped-below-80' | null;
+  lastTransitionAt?: number;
 }
 
-const LOCAL_DEVICE_ID_KEY = 'quemint_proctoring_device_id';
-const LIVE_TELEMETRY_STORAGE_KEY = 'quemint_live_telemetry_v4';
-const LIVE_FRAMES_STORAGE_KEY = 'quemint_live_frames_v4';
-const BROADCAST_CHANNEL_NAME = 'quemint_live_proctoring_channel_v4';
+const STORAGE_KEY = 'quemint_live_proctoring_telemetry_v2';
+const CHANNEL_NAME = 'quemint_live_proctoring_channel_v2';
+const DEVICE_ID_KEY = 'quemint_device_id_v1';
 
 export function getLocalDeviceId(): string {
-  if (typeof window === 'undefined') return 'server';
   try {
-    let id = sessionStorage.getItem(LOCAL_DEVICE_ID_KEY);
+    let id = localStorage.getItem(DEVICE_ID_KEY);
     if (!id) {
-      id = `dev-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-      sessionStorage.setItem(LOCAL_DEVICE_ID_KEY, id);
+      id = `dev-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
+      localStorage.setItem(DEVICE_ID_KEY, id);
     }
     return id;
   } catch {
-    return 'local-dev';
+    return 'dev-local';
   }
 }
 
-export function getCandidateHdPortraitUrl(candidate: Partial<Candidate>): string {
-  const existing = (candidate.passportDataUrl || '').trim();
-  if (existing && !existing.startsWith('/proctoring/')) {
-    return existing;
+/**
+ * Returns the candidate's uploaded Passport Photograph ONLY if the candidate (or admin) uploaded one.
+ * If no photo has been uploaded, returns an empty string ('') so registration photo and photocard remain blank.
+ */
+export function getCandidateHdPortraitUrl(
+  cand: Pick<Candidate, 'passportDataUrl'> | null | undefined
+): string {
+  const raw = cand?.passportDataUrl?.trim() || '';
+  if (!raw) return '';
+  // Ignore any legacy pre-seeded stock paths or external placeholder URLs
+  if (
+    raw.startsWith('/proctoring/') ||
+    raw.includes('unsplash.com') ||
+    raw.includes('pravatar.cc') ||
+    raw.includes('randomuser.me')
+  ) {
+    return '';
   }
-  const initials = `${(candidate.firstName || 'C')[0] || 'C'}${
-    (candidate.surname || 'S')[0] || 'S'
-  }`.toUpperCase();
-  const fullName = `${candidate.firstName || 'Candidate'} ${candidate.surname || ''}`.trim();
-  const regNo = candidate.regNumber || 'QMT-CANDIDATE';
-  const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="240" height="240" viewBox="0 0 240 240">
-    <rect width="240" height="240" rx="24" fill="#0a6b3c"/>
-    <circle cx="120" cy="86" r="42" fill="#0e8a4e" stroke="#ffffff" stroke-width="3"/>
-    <path d="M48 212 C48 164 192 164 192 212" fill="#0e8a4e" stroke="#ffffff" stroke-width="3"/>
-    <text x="120" y="98" text-anchor="middle" fill="#ffffff" font-family="Arial, sans-serif" font-size="30" font-weight="bold">${initials}</text>
-    <rect x="16" y="198" width="208" height="28" rx="8" fill="#000000" fill-opacity="0.55"/>
-    <text x="120" y="216" text-anchor="middle" fill="#ffffff" font-family="monospace" font-size="11" font-weight="bold">${regNo.slice(0, 18)}</text>
-    <title>${fullName}</title>
-  </svg>`;
-  return `data:image/svg+xml;utf8,${encodeURIComponent(svg)}`;
-}
-
-export function buildInitialCandidateTelemetry(
-  candidates: Candidate[],
-  results: ExamResult[] = [],
-  existingMap: Record<string, LiveCandidateTelemetry> = {}
-): Record<string, LiveCandidateTelemetry> {
-  const map: Record<string, LiveCandidateTelemetry> = { ...existingMap };
-  candidates.forEach((candidate) => {
-    const existing = map[candidate.id];
-    const matchedRes = results.find(
-      (r) =>
-        r.candidateId === candidate.id ||
-        (candidate.regNumber &&
-          r.regNumber.trim().toUpperCase() ===
-            candidate.regNumber.trim().toUpperCase())
-    );
-    const subjects = (
-      candidate.subjectCombination || 'English Language, Biology, Chemistry, Physics'
-    )
-      .split(',')
-      .map((s) => s.trim())
-      .filter(Boolean);
-
-    const defaultAcc = matchedRes ? matchedRes.percentage : existing?.accuracyPercent ?? 75;
-    const defaultAnswered = matchedRes
-      ? matchedRes.totalQuestions
-      : existing?.answeredCount ?? 12;
-    const defaultCorrect = matchedRes
-      ? matchedRes.rawTotalCorrect ?? Math.round((defaultAcc / 100) * defaultAnswered)
-      : existing?.correctCount ?? 9;
-
-    map[candidate.id] = {
-      candidateId: candidate.id,
-      regNumber: candidate.regNumber || 'PENDING',
-      candidateName: `${candidate.firstName} ${
-        candidate.middleName ? candidate.middleName + ' ' : ''
-      }${candidate.surname}`.trim(),
-      category: candidate.category || 'Science',
-      gender: candidate.gender || 'Female',
-      currentSubject: existing?.currentSubject || subjects[0] || 'English Language',
-      currentQuestionIndex: existing?.currentQuestionIndex ?? 1,
-      totalQuestions: existing?.totalQuestions ?? 40,
-      answeredCount: defaultAnswered,
-      correctCount: defaultCorrect,
-      wrongCount: Math.max(0, defaultAnswered - defaultCorrect),
-      accuracyPercent: defaultAcc,
-      currentStreakType: existing?.currentStreakType || 'none',
-      currentStreakCount: existing?.currentStreakCount || 0,
-      timeRemainingSeconds: existing?.timeRemainingSeconds ?? 1800,
-      timeLeftSeconds: existing?.timeLeftSeconds ?? existing?.timeRemainingSeconds ?? 1800,
-      cameraConnected: existing?.cameraConnected ?? false,
-      cameraActive: existing?.cameraActive ?? existing?.cameraConnected ?? false,
-      faceVerified: existing?.faceVerified ?? true,
-      focusStatus: existing?.focusStatus || 'Focused',
-      securityFlags: existing?.securityFlags ?? 0,
-      status: matchedRes ? 'Submitted' : existing?.status || 'Idle',
-      isLiveFromExamTab: existing?.isLiveFromExamTab ?? false,
-      passportDataUrl: getCandidateHdPortraitUrl(candidate),
-      lastTransition: existing?.lastTransition || 'none',
-      lastTransitionAt: existing?.lastTransitionAt,
-      lastUpdated: existing?.lastUpdated ?? 0,
-    };
-  });
-  return map;
+  return raw;
 }
 
 export function getSavedLiveTelemetryMap(): Record<string, LiveCandidateTelemetry> {
-  if (typeof window === 'undefined') return {};
   try {
-    const raw = localStorage.getItem(LIVE_TELEMETRY_STORAGE_KEY);
-    return raw ? JSON.parse(raw) : {};
+    const raw = localStorage.getItem(STORAGE_KEY);
+    if (!raw) return {};
+    return JSON.parse(raw);
   } catch {
     return {};
   }
-}
-
-export function getSavedLiveFramesMap(): Record<string, string> {
-  if (typeof window === 'undefined') return {};
-  try {
-    const raw = localStorage.getItem(LIVE_FRAMES_STORAGE_KEY);
-    return raw ? JSON.parse(raw) : {};
-  } catch {
-    return {};
-  }
-}
-
-let sharedChannel: BroadcastChannel | null = null;
-function getChannel(): BroadcastChannel | null {
-  if (typeof window === 'undefined' || typeof BroadcastChannel === 'undefined') {
-    return null;
-  }
-  if (!sharedChannel) {
-    try {
-      sharedChannel = new BroadcastChannel(BROADCAST_CHANNEL_NAME);
-    } catch {
-      sharedChannel = null;
-    }
-  }
-  return sharedChannel;
 }
 
 export function publishCandidateLiveTelemetry(telemetry: LiveCandidateTelemetry): void {
-  if (typeof window === 'undefined') return;
-  const acc =
-    typeof telemetry.accuracyPercent === 'number'
-      ? telemetry.accuracyPercent
-      : telemetry.answeredCount > 0
-      ? Math.round((telemetry.correctCount / telemetry.answeredCount) * 100)
-      : 0;
-  const enriched: LiveCandidateTelemetry = {
-    ...telemetry,
-    accuracyPercent: acc,
-    timeLeftSeconds:
-      telemetry.timeLeftSeconds ?? telemetry.timeRemainingSeconds ?? 1800,
-    isLiveFromExamTab: telemetry.isLiveFromExamTab ?? true,
-    lastUpdated: Date.now(),
-    senderDeviceId: telemetry.senderDeviceId || getLocalDeviceId(),
-  };
-
   try {
-    const existing = getSavedLiveTelemetryMap();
-    existing[telemetry.candidateId] = enriched;
-    localStorage.setItem(LIVE_TELEMETRY_STORAGE_KEY, JSON.stringify(existing));
-  } catch {
-    // ignore storage quota errors
-  }
+    const current = getSavedLiveTelemetryMap();
+    const prev = current[telemetry.candidateId];
+    let lastTransition = prev?.lastTransition || null;
+    let lastTransitionAt = prev?.lastTransitionAt || undefined;
 
-  try {
-    getChannel()?.postMessage({
-      type: 'TELEMETRY_UPDATE',
-      candidateId: telemetry.candidateId,
-      telemetry: enriched,
-    });
-  } catch {
-    // ignore
-  }
+    if (prev) {
+      if (prev.accuracyPercent < 80 && telemetry.accuracyPercent >= 80) {
+        lastTransition = 'promoted-to-top';
+        lastTransitionAt = Date.now();
+      } else if (prev.accuracyPercent >= 80 && telemetry.accuracyPercent < 80) {
+        lastTransition = 'dropped-below-80';
+        lastTransitionAt = Date.now();
+      }
+    }
 
-  fetch('/api/proctoring/publish', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      candidateId: telemetry.candidateId,
-      senderDeviceId: enriched.senderDeviceId,
-      telemetry: enriched,
-    }),
-  }).catch(() => {});
+    const enriched: LiveCandidateTelemetry = {
+      ...telemetry,
+      senderDeviceId: telemetry.senderDeviceId || getLocalDeviceId(),
+      lastTransition,
+      lastTransitionAt,
+      lastUpdated: Date.now(),
+    };
+
+    current[telemetry.candidateId] = enriched;
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(current));
+
+    if (typeof BroadcastChannel !== 'undefined') {
+      const bc = new BroadcastChannel(CHANNEL_NAME);
+      bc.postMessage({ type: 'TELEMETRY_UPDATE', payload: enriched });
+      bc.close();
+    }
+
+    if (typeof fetch !== 'undefined' && telemetry.isLiveFromExamTab) {
+      fetch('/api/proctoring/publish', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          candidateId: enriched.candidateId,
+          senderDeviceId: enriched.senderDeviceId,
+          telemetry: enriched,
+        }),
+      }).catch(() => {});
+    }
+  } catch {
+    // Ignore storage quota errors
+  }
 }
 
+/**
+ * Publishes a live real-time webcam frame captured from a student taking an exam in ExamInterface.tsx
+ * via both BroadcastChannel (0ms cross-tab) and /api/proctoring/publish (cross-device).
+ */
 export function publishCandidateLiveFrame(
   candidateId: string,
-  frameDataUrl: string,
+  liveFrameDataUrl: string,
   telemetry?: LiveCandidateTelemetry
 ): void {
-  if (typeof window === 'undefined' || !candidateId || !frameDataUrl) return;
-  const senderDeviceId = getLocalDeviceId();
-
   try {
-    const frames = getSavedLiveFramesMap();
-    frames[candidateId] = frameDataUrl;
-    localStorage.setItem(LIVE_FRAMES_STORAGE_KEY, JSON.stringify(frames));
-  } catch {
-    // ignore quota errors
-  }
+    const senderDeviceId = getLocalDeviceId();
+    if (typeof BroadcastChannel !== 'undefined') {
+      const bc = new BroadcastChannel(CHANNEL_NAME);
+      bc.postMessage({
+        type: 'LIVE_FRAME_UPDATE',
+        candidateId,
+        liveFrameDataUrl,
+        telemetry,
+        senderDeviceId,
+        updatedAt: Date.now(),
+      });
+      bc.close();
+    }
 
-  try {
-    getChannel()?.postMessage({
-      type: 'FRAME_UPDATE',
-      candidateId,
-      frameDataUrl,
-      telemetry,
-      senderDeviceId,
-    });
+    if (typeof fetch !== 'undefined') {
+      fetch('/api/proctoring/publish', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          candidateId,
+          senderDeviceId,
+          liveFrameDataUrl,
+          telemetry,
+        }),
+      }).catch(() => {});
+    }
   } catch {
-    // ignore
+    // Ignore errors
   }
-
-  fetch('/api/proctoring/publish', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      candidateId,
-      senderDeviceId,
-      liveFrameDataUrl: frameDataUrl,
-      telemetry: telemetry
-        ? {
-            ...telemetry,
-            isLiveFromExamTab: true,
-            lastUpdated: Date.now(),
-            senderDeviceId,
-          }
-        : undefined,
-    }),
-  }).catch(() => {});
 }
 
+/**
+ * Immediately unpublishes a candidate's live camera stream when they exit or submit the exam.
+ */
 export function unpublishCandidateLiveStream(candidateId: string): void {
-  if (typeof window === 'undefined' || !candidateId) return;
   try {
-    const frames = getSavedLiveFramesMap();
-    delete frames[candidateId];
-    localStorage.setItem(LIVE_FRAMES_STORAGE_KEY, JSON.stringify(frames));
-  } catch {
-    // ignore
-  }
+    const current = getSavedLiveTelemetryMap();
+    if (current[candidateId]) {
+      current[candidateId] = {
+        ...current[candidateId],
+        isLiveFromExamTab: false,
+        cameraActive: false,
+        lastUpdated: Date.now(),
+      };
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(current));
+    }
 
-  try {
-    getChannel()?.postMessage({
-      type: 'CANDIDATE_DISCONNECTED',
-      candidateId,
-    });
-  } catch {
-    // ignore
-  }
+    if (typeof BroadcastChannel !== 'undefined') {
+      const bc = new BroadcastChannel(CHANNEL_NAME);
+      bc.postMessage({
+        type: 'CANDIDATE_DISCONNECTED',
+        candidateId,
+      });
+      bc.close();
+    }
 
-  fetch('/api/proctoring/disconnect', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ candidateId }),
-  }).catch(() => {});
+    if (typeof fetch !== 'undefined') {
+      fetch('/api/proctoring/unpublish', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ candidateId }),
+      }).catch(() => {});
+    }
+  } catch {
+    // Ignore errors
+  }
 }
 
 export function subscribeToLiveProctoring(
-  onTelemetryMap: (latestMap: Record<string, LiveCandidateTelemetry>) => void,
-  onFrame: (
+  onUpdate: (map: Record<string, LiveCandidateTelemetry>) => void,
+  onLiveFrame?: (
     candidateId: string,
     liveFrameDataUrl: string,
-    incomingTelemetry?: LiveCandidateTelemetry
+    telemetry?: LiveCandidateTelemetry
   ) => void,
-  onDisconnect?: (disconnectedCandidateId: string) => void
+  onCandidateDisconnect?: (candidateId: string) => void
 ): () => void {
-  if (typeof window === 'undefined') return () => {};
-
-  const emitSingleTelemetry = (cid: string, tel: LiveCandidateTelemetry) => {
-    onTelemetryMap({
-      [cid]: {
-        ...tel,
-        isLiveFromExamTab: true,
-        lastUpdated: tel.lastUpdated || Date.now(),
-      },
-    });
-  };
-
   let bc: BroadcastChannel | null = null;
-  const handleBcMessage = (ev: MessageEvent) => {
-    const data = ev.data;
-    if (!data || typeof data !== 'object') return;
-    if (data.type === 'TELEMETRY_UPDATE' && data.candidateId && data.telemetry) {
-      emitSingleTelemetry(data.candidateId, data.telemetry);
-    } else if (data.type === 'FRAME_UPDATE' && data.candidateId && data.frameDataUrl) {
-      onFrame(data.candidateId, data.frameDataUrl, data.telemetry);
-    } else if (data.type === 'CANDIDATE_DISCONNECTED' && data.candidateId) {
-      onDisconnect?.(data.candidateId);
-    }
-  };
 
   if (typeof BroadcastChannel !== 'undefined') {
-    try {
-      bc = new BroadcastChannel(BROADCAST_CHANNEL_NAME);
-      bc.addEventListener('message', handleBcMessage);
-    } catch {
-      bc = null;
-    }
-  }
-
-  let es: EventSource | null = null;
-  try {
-    es = new EventSource('/api/proctoring/stream');
-    es.onmessage = (event) => {
-      try {
-        const parsed = JSON.parse(event.data);
-        if (parsed.type === 'SNAPSHOT' && Array.isArray(parsed.feeds)) {
-          const batchMap: Record<string, LiveCandidateTelemetry> = {};
-          parsed.feeds.forEach((f: any) => {
-            if (f.candidateId && f.telemetry) {
-              batchMap[f.candidateId] = {
-                ...f.telemetry,
-                isLiveFromExamTab: true,
-                lastUpdated: f.updatedAt || Date.now(),
-              };
-            }
-            if (f.candidateId && f.liveFrameDataUrl) {
-              onFrame(f.candidateId, f.liveFrameDataUrl, f.telemetry);
-            }
-          });
-          if (Object.keys(batchMap).length > 0) {
-            onTelemetryMap(batchMap);
-          }
-        } else if (parsed.type === 'FEED_UPDATE' && parsed.feed) {
-          const f = parsed.feed;
-          if (f.candidateId && f.telemetry) {
-            emitSingleTelemetry(f.candidateId, f.telemetry);
-          }
-          if (f.candidateId && f.liveFrameDataUrl) {
-            onFrame(f.candidateId, f.liveFrameDataUrl, f.telemetry);
-          }
-        } else if (parsed.type === 'CANDIDATE_DISCONNECTED' && parsed.candidateId) {
-          onDisconnect?.(parsed.candidateId);
+    bc = new BroadcastChannel(CHANNEL_NAME);
+    bc.onmessage = (event) => {
+      const msg = event.data;
+      if (msg?.type === 'LIVE_FRAME_UPDATE' && msg.candidateId && msg.liveFrameDataUrl) {
+        if (onLiveFrame) {
+          onLiveFrame(msg.candidateId, msg.liveFrameDataUrl, msg.telemetry);
         }
-      } catch {
-        // ignore parse errors
+      } else if (msg?.type === 'CANDIDATE_DISCONNECTED' && msg.candidateId) {
+        onUpdate(getSavedLiveTelemetryMap());
+        if (onCandidateDisconnect) {
+          onCandidateDisconnect(msg.candidateId);
+        }
+      } else {
+        onUpdate(getSavedLiveTelemetryMap());
       }
     };
-  } catch {
-    es = null;
   }
 
-  const pollFeeds = async () => {
-    try {
-      const res = await fetch('/api/proctoring/feeds');
-      if (!res.ok) return;
-      const data = await res.json();
-      if (Array.isArray(data?.feeds)) {
-        const batchMap: Record<string, LiveCandidateTelemetry> = {};
-        data.feeds.forEach((f: any) => {
-          if (f.candidateId && f.telemetry) {
-            batchMap[f.candidateId] = {
-              ...f.telemetry,
-              isLiveFromExamTab: true,
-              lastUpdated: f.updatedAt || Date.now(),
-            };
-          }
-          if (f.candidateId && f.liveFrameDataUrl) {
-            onFrame(f.candidateId, f.liveFrameDataUrl, f.telemetry);
-          }
-        });
-        if (Object.keys(batchMap).length > 0) {
-          onTelemetryMap(batchMap);
-        }
-      }
-    } catch {
-      // ignore
+  const handleStorage = (e: StorageEvent) => {
+    if (e.key === STORAGE_KEY) {
+      onUpdate(getSavedLiveTelemetryMap());
     }
   };
 
-  pollFeeds();
-  const pollInterval = setInterval(pollFeeds, 2500);
+  window.addEventListener('storage', handleStorage);
 
   return () => {
-    clearInterval(pollInterval);
-    if (bc) {
-      bc.removeEventListener('message', handleBcMessage);
-      bc.close();
-    }
-    if (es) {
-      es.close();
-    }
+    if (bc) bc.close();
+    window.removeEventListener('storage', handleStorage);
   };
+}
+
+/**
+ * Generates initial realistic live exam session telemetry for all active Paid candidates
+ * so that both <80% and >=80% columns are populated and dynamic right away.
+ */
+export function buildInitialCandidateTelemetry(
+  candidates: Candidate[],
+  results: ExamResult[],
+  existingMap: Record<string, LiveCandidateTelemetry>
+): Record<string, LiveCandidateTelemetry> {
+  const nextMap: Record<string, LiveCandidateTelemetry> = { ...existingMap };
+  const paidCandidates = candidates.filter(
+    (c) => c.paymentStatus === 'Paid' && !c.proctoringCleared
+  );
+
+  const defaultSubjectsByCategory: Record<string, string[]> = {
+    medical: ['Biology', 'Chemistry', 'Physics', 'English'],
+    engineering: ['Mathematics', 'Physics', 'Chemistry', 'English'],
+    art: ['Literature', 'Government', 'English'],
+    commercial: ['Economics', 'Mathematics', 'English'],
+  };
+
+  paidCandidates.forEach((cand, idx) => {
+    const existing = nextMap[cand.id];
+    const fullName = `${cand.firstName} ${cand.middleName ? cand.middleName + ' ' : ''}${cand.surname}`.trim();
+    const resolvedPortrait = getCandidateHdPortraitUrl(cand);
+
+    if (existing) {
+      nextMap[cand.id] = {
+        ...existing,
+        regNumber: cand.regNumber,
+        candidateName: fullName,
+        category: cand.category,
+        gender: cand.gender,
+        passportDataUrl: resolvedPortrait,
+      };
+      return;
+    }
+
+    // Check if candidate has an existing exam result to seed initial accuracy
+    const matchedResult = results.find(
+      (r) =>
+        r.candidateId === cand.id ||
+        r.regNumber.trim().toUpperCase() === cand.regNumber.trim().toUpperCase()
+    );
+
+    const catKey = cand.category.trim().toLowerCase();
+    const subjPool = defaultSubjectsByCategory[catKey] || [
+      'English',
+      'Biology',
+      'Chemistry',
+      'Physics',
+    ];
+    const currentSubject = subjPool[idx % subjPool.length];
+    const totalQuestions = 40;
+
+    // Seed some candidates >= 80% accuracy (Top Performers) and some < 80% accuracy
+    let answeredCount = 15 + ((idx * 5) % 18);
+    let correctCount = 0;
+
+    if (matchedResult) {
+      answeredCount = Math.min(totalQuestions, Math.max(10, matchedResult.totalQuestions || 25));
+      correctCount = Math.round((matchedResult.percentage / 100) * answeredCount);
+    } else {
+      // Alternate so some start at ~85-92% and others start at ~62-78% (near the 80% threshold for dynamic movement)
+      const targetRatios = [0.88, 0.75, 0.84, 0.79, 0.91, 0.68, 0.81, 0.72];
+      const ratio = targetRatios[idx % targetRatios.length];
+      correctCount = Math.round(answeredCount * ratio);
+    }
+
+    const accuracyPercent =
+      answeredCount > 0 ? Math.round((correctCount / answeredCount) * 100) : 0;
+
+    nextMap[cand.id] = {
+      candidateId: cand.id,
+      regNumber: cand.regNumber,
+      candidateName: fullName,
+      category: cand.category,
+      gender: cand.gender,
+      passportDataUrl: resolvedPortrait,
+      testTitle: 'Rapid Test',
+      testCode: 'RAPID-2026-QMT',
+      currentSubject,
+      currentQuestionIndex: Math.min(totalQuestions, answeredCount + 1),
+      totalQuestions,
+      answeredCount,
+      correctCount,
+      accuracyPercent,
+      focusStatus: 'Focused',
+      cameraActive: true,
+      isLiveFromExamTab: false,
+      lastUpdated: Date.now(),
+      lastTransition: null,
+    };
+  });
+
+  return nextMap;
 }
