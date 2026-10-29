@@ -58,6 +58,7 @@ import {
   NotificationItem,
   PublishedTest,
   Question,
+  QuestionBankItem,
   QuestionDownloadMode,
   ResultSlipFieldConfig,
   SubjectCombinationConfig,
@@ -106,7 +107,10 @@ interface AdminDashboardProps {
   onDeleteCandidates: (ids: string[]) => void;
   onClearAllCandidates: () => void;
   onAddQuestion: (question: Question) => void;
+  onAddQuestionsBulk?: (questions: Question[]) => void;
+  onUpdateQuestion?: (question: Question) => void;
   onDeleteQuestion: (id: string) => void;
+  onDeleteQuestionsBulk?: (ids: string[]) => void;
   onUpdateResult: (updatedResult: ExamResult) => void;
   onDeleteResults: (ids: string[]) => void;
   onClearAllResults: () => void;
@@ -144,7 +148,10 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
   onDeleteCandidates,
   onClearAllCandidates,
   onAddQuestion,
+  onAddQuestionsBulk,
+  onUpdateQuestion,
   onDeleteQuestion,
+  onDeleteQuestionsBulk,
   onUpdateResult,
   onDeleteResults,
   onClearAllResults,
@@ -577,11 +584,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
   const [newStateOfOrigin, setNewStateOfOrigin] = useState('');
 
   // Question Bank states
-  const [subjectsList, setSubjectsList] = useState<string[]>(DEFAULT_SUBJECTS_LIST);
-  const [qSubject, setQSubject] = useState('English');
-  const [questionBanks, setQuestionBanks] = useState<
-    { id: string; subject: string; title: string; description: string }[]
-  >([
+  const DEFAULT_QUESTION_BANKS: QuestionBankItem[] = [
     {
       id: 'bank-eng-1',
       subject: 'English',
@@ -618,23 +621,441 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
       title: 'Inorganic & Physical Chemistry',
       description: 'Oxidation states, gas laws, periodic table, and pH calculations',
     },
-  ]);
+    {
+      id: 'bank-eco-1',
+      subject: 'Economics',
+      title: 'Principles of Economics & Finance',
+      description: 'Demand elasticity, banking institutions, interest, and inflation',
+    },
+    {
+      id: 'bank-gov-1',
+      subject: 'Government',
+      title: 'Political Systems & Constitution',
+      description: 'Separation of powers, federalism, and public administration',
+    },
+    {
+      id: 'bank-lit-1',
+      subject: 'Literature',
+      title: 'Poetry, Prose & Literary Appreciation',
+      description: 'Figures of speech, sonnets, themes, and dramatic techniques',
+    },
+  ];
+
+  const [subjectsList, setSubjectsList] = useState<string[]>(
+    settings.availableSubjects && settings.availableSubjects.length > 0
+      ? settings.availableSubjects
+      : DEFAULT_SUBJECTS_LIST
+  );
+  const [qSubject, setQSubject] = useState('English');
+  const [questionBanks, setQuestionBanks] = useState<QuestionBankItem[]>(() =>
+    settings.questionBanks && settings.questionBanks.length > 0
+      ? settings.questionBanks
+      : DEFAULT_QUESTION_BANKS
+  );
+
+  useEffect(() => {
+    if (settings.questionBanks && settings.questionBanks.length > 0) {
+      setQuestionBanks(settings.questionBanks);
+    }
+  }, [settings.questionBanks]);
+
   const [openedBankId, setOpenedBankId] = useState<string | null>(null);
   const [showAddSubjectModal, setShowAddSubjectModal] = useState(false);
   const [newSubjectName, setNewSubjectName] = useState('');
   const [showAddBankModal, setShowAddBankModal] = useState(false);
   const [newBankTitle, setNewBankTitle] = useState('');
   const [newBankDesc, setNewBankDesc] = useState('');
+  const [editingBankItem, setEditingBankItem] = useState<QuestionBankItem | null>(null);
 
+  // Single Question Creation states (including image upload)
   const [qCategory, setQCategory] = useState<CategoryType | 'All'>('All');
   const [qText, setQText] = useState('');
+  const [qImageUrl, setQImageUrl] = useState<string>('');
   const [qOptA, setQOptA] = useState('');
   const [qOptB, setQOptB] = useState('');
   const [qOptC, setQOptC] = useState('');
   const [qOptD, setQOptD] = useState('');
   const [qCorrect, setQCorrect] = useState(0);
 
+  // Bulk Question Upload, Search, Bulk Delete & Individual Edit Question states
+  const [bulkQuestionsText, setBulkQuestionsText] = useState<string>(
+    `1. Choose the option nearest in meaning to the word EPHEMERAL.\nA. Eternal and unchanging\nB. Short-lived and transitory\nC. Extremely dangerous\nD. Loud and disruptive\nAnswer: B\n\n2. Identify the figure of speech in the sentence: "The thunder grumbled like an old man."\nA. Metaphor\nB. Personification\nC. Simile\nD. Hyperbole\nAnswer: C`
+  );
+  const [bulkQuestionsCategory, setBulkQuestionsCategory] = useState<CategoryType | 'All'>('All');
+  const [previewedBulkQuestions, setPreviewedBulkQuestions] = useState<Question[]>([]);
+  const [selectedQuestionIds, setSelectedQuestionIds] = useState<string[]>([]);
+  const [bankQuestionSearch, setBankQuestionSearch] = useState<string>('');
+  const [editingQuestion, setEditingQuestion] = useState<Question | null>(null);
+
   const [copiedId, setCopiedId] = useState<string | null>(null);
+
+  // Helper: read an uploaded image File into a compressed Data URL for a question
+  const readQuestionImageFile = (
+    file: File,
+    onLoaded: (dataUrl: string) => void
+  ) => {
+    const reader = new FileReader();
+    reader.onload = () => {
+      const rawDataUrl = typeof reader.result === 'string' ? reader.result : '';
+      if (!rawDataUrl) return;
+      const img = new Image();
+      img.onload = () => {
+        const maxDim = 960;
+        let width = img.width;
+        let height = img.height;
+        if (width > maxDim || height > maxDim) {
+          if (width > height) {
+            height = Math.round((height * maxDim) / width);
+            width = maxDim;
+          } else {
+            width = Math.round((width * maxDim) / height);
+            height = maxDim;
+          }
+        }
+        const canvas = document.createElement('canvas');
+        canvas.width = width;
+        canvas.height = height;
+        const ctx = canvas.getContext('2d');
+        if (ctx) {
+          ctx.fillStyle = '#ffffff';
+          ctx.fillRect(0, 0, width, height);
+          ctx.drawImage(img, 0, 0, width, height);
+          onLoaded(canvas.toDataURL('image/jpeg', 0.86));
+        } else {
+          onLoaded(rawDataUrl);
+        }
+      };
+      img.onerror = () => onLoaded(rawDataUrl);
+      img.src = rawDataUrl;
+    };
+    reader.readAsDataURL(file);
+  };
+
+  // Helper: get questions belonging to a specific Question Bank under a subject
+  const getQuestionsForBank = (
+    subject: string,
+    bankId: string,
+    banksSource: QuestionBankItem[] = questionBanks
+  ): Question[] => {
+    const banksForSubj = banksSource.filter(
+      (b) => b.subject.trim().toLowerCase() === subject.trim().toLowerCase()
+    );
+    const isFirstBank = banksForSubj[0]?.id === bankId;
+    return questions.filter((q) => {
+      if (q.subject.trim().toLowerCase() !== subject.trim().toLowerCase()) {
+        return false;
+      }
+      if (q.bankId) {
+        return q.bankId === bankId;
+      }
+      return isFirstBank;
+    });
+  };
+
+  // Helper: persist Question Banks to settings & sync with subjectPooling
+  const syncQuestionBanksToSettings = (
+    nextBanks: QuestionBankItem[],
+    overrideQuestions?: Question[]
+  ) => {
+    setQuestionBanks(nextBanks);
+    const activeQs = overrideQuestions || questions;
+
+    const existingPooling = [...(settings.subjectPooling || [])];
+    const subjectsWithBanks = Array.from(
+      new Set([
+        ...existingPooling.map((sp) => sp.subject),
+        ...nextBanks.map((b) => b.subject),
+      ])
+    );
+
+    const updatedPooling: SubjectPoolConfig[] = subjectsWithBanks.map((subj) => {
+      const existingSubjPool = existingPooling.find(
+        (sp) => sp.subject.trim().toLowerCase() === subj.trim().toLowerCase()
+      );
+      const subjBanks = nextBanks.filter(
+        (b) => b.subject.trim().toLowerCase() === subj.trim().toLowerCase()
+      );
+
+      const mappedBanks = subjBanks.map((b, idx) => {
+        const prevBankCfg = existingSubjPool?.banks.find(
+          (eb) => eb.bankId === b.id
+        );
+        const isFirst = idx === 0;
+        const availCount = activeQs.filter((q) => {
+          if (q.subject.trim().toLowerCase() !== subj.trim().toLowerCase()) {
+            return false;
+          }
+          if (q.bankId) return q.bankId === b.id;
+          return isFirst;
+        }).length;
+
+        return {
+          bankId: b.id,
+          title: b.title,
+          description: b.description,
+          available: availCount,
+          enabled: prevBankCfg ? prevBankCfg.enabled : isFirst,
+          pick: prevBankCfg ? prevBankCfg.pick : isFirst ? 10 : 0,
+        };
+      });
+
+      return {
+        subject: subj,
+        subjectTotal: existingSubjPool?.subjectTotal ?? 10,
+        expanded: existingSubjPool?.expanded ?? true,
+        banks: mappedBanks,
+      };
+    });
+
+    onUpdateSettings({
+      ...settings,
+      questionBanks: nextBanks,
+      subjectPooling: updatedPooling,
+    });
+  };
+
+  // Parse bulk questions from pasted text (supports Pipe | format, Numbered/Multi-line Exam blocks, CSV, or JSON)
+  const parseBulkQuestionsInput = (
+    rawInput: string,
+    targetSubject: string,
+    targetBankId: string,
+    targetCategory: CategoryType | 'All'
+  ): Question[] => {
+    const trimmed = rawInput.trim();
+    if (!trimmed) return [];
+
+    const resolveAnswerIndex = (
+      ansRaw: string,
+      opts: [string, string, string, string]
+    ): number => {
+      const clean = (ansRaw || '')
+        .trim()
+        .replace(/^(answer|ans|correct|key)\s*[:=-]?\s*/i, '')
+        .replace(/^[(\[]|[)\].]$/g, '')
+        .trim();
+      const upper = clean.toUpperCase();
+      if (upper === 'A' || upper === '1' || upper.startsWith('OPTION A')) return 0;
+      if (upper === 'B' || upper === '2' || upper.startsWith('OPTION B')) return 1;
+      if (upper === 'C' || upper === '3' || upper.startsWith('OPTION C')) return 2;
+      if (upper === 'D' || upper === '4' || upper.startsWith('OPTION D')) return 3;
+      const matchIdx = opts.findIndex(
+        (o) => o.trim().toLowerCase() === clean.toLowerCase()
+      );
+      return matchIdx >= 0 ? matchIdx : 0;
+    };
+
+    // 1. Check if input is JSON array
+    if (trimmed.startsWith('[')) {
+      try {
+        const parsedJson = JSON.parse(trimmed);
+        if (Array.isArray(parsedJson)) {
+          return parsedJson
+            .map((item: any, idx: number): Question | null => {
+              const qTxt = String(
+                item.questionText || item.question || item.prompt || ''
+              ).trim();
+              if (!qTxt) return null;
+              const rawOpts = Array.isArray(item.options)
+                ? item.options
+                : [item.optionA, item.optionB, item.optionC, item.optionD];
+              const opts: [string, string, string, string] = [
+                String(rawOpts[0] || 'Option A').trim(),
+                String(rawOpts[1] || 'Option B').trim(),
+                String(rawOpts[2] || 'Option C').trim(),
+                String(rawOpts[3] || 'Option D').trim(),
+              ];
+              const cIdx =
+                typeof item.correctAnswer === 'number'
+                  ? Math.max(0, Math.min(3, item.correctAnswer))
+                  : resolveAnswerIndex(
+                      String(item.correctAnswer ?? item.answer ?? 'A'),
+                      opts
+                    );
+              return {
+                id: `q-bulk-${Date.now()}-${idx}`,
+                subject: targetSubject,
+                bankId: targetBankId,
+                category: item.category || targetCategory,
+                questionText: qTxt,
+                imageUrl: item.imageUrl || undefined,
+                options: opts,
+                correctAnswer: cIdx,
+              };
+            })
+            .filter((q): q is Question => q !== null);
+        }
+      } catch {
+        // Fall through to text parsers
+      }
+    }
+
+    const lines = trimmed
+      .split(/\r?\n/)
+      .map((l) => l.trim())
+      .filter(Boolean);
+
+    // 2. Check if Pipe (|) or Tab (\t) single-line per question format
+    const isSingleLineDelimited = lines.some(
+      (l) => l.includes('|') || l.split('\t').length >= 5
+    );
+    if (isSingleLineDelimited) {
+      return lines
+        .map((line, idx): Question | null => {
+          const delim = line.includes('|') ? '|' : '\t';
+          const parts = line.split(delim).map((p) => p.trim());
+          if (parts.length < 3) return null;
+          // Skip header row if present
+          if (
+            idx === 0 &&
+            parts[0].toLowerCase().includes('question') &&
+            parts[1].toLowerCase().includes('option')
+          ) {
+            return null;
+          }
+          const qTxt = parts[0].replace(/^(?:Q(?:uestion)?\s*)?\d+\s*[.):-]\s*/i, '').trim();
+          if (!qTxt) return null;
+          const opts: [string, string, string, string] = [
+            parts[1] || 'Option A',
+            parts[2] || 'Option B',
+            parts[3] || 'None of the above',
+            parts[4] || 'All of the above',
+          ];
+          const cIdx = resolveAnswerIndex(parts[5] || 'A', opts);
+          return {
+            id: `q-bulk-${Date.now()}-${idx}`,
+            subject: targetSubject,
+            bankId: targetBankId,
+            category: targetCategory,
+            questionText: qTxt,
+            options: opts,
+            correctAnswer: cIdx,
+          };
+        })
+        .filter((q): q is Question => q !== null);
+    }
+
+    // 3. Multi-line / Numbered Question Blocks (supports blank-line separated blocks OR consecutive numbered questions)
+    const rawBlocks: string[][] = [];
+    let currentBlock: string[] = [];
+
+    const allRawLines = trimmed.split(/\r?\n/);
+    for (const rawLine of allRawLines) {
+      const line = rawLine.trim();
+      if (!line) {
+        if (currentBlock.length > 0) {
+          rawBlocks.push(currentBlock);
+          currentBlock = [];
+        }
+        continue;
+      }
+      // If we already have options/answer in currentBlock and encounter a new numbered question line (e.g. "2. ...")
+      const isNewNumberedQuestion =
+        /^(?:Q(?:uestion)?\s*)?\d+\s*[.):-]\s+/i.test(line) &&
+        currentBlock.some(( prevLine ) =>
+          /^\*?\s*(?:[A-Da-d]\s*[.):-]|[(][A-Da-d][)]|Answer|Ans|Correct)/i.test(
+            prevLine
+          )
+        );
+      if (isNewNumberedQuestion && currentBlock.length > 0) {
+        rawBlocks.push(currentBlock);
+        currentBlock = [line];
+      } else {
+        currentBlock.push(line);
+      }
+    }
+    if (currentBlock.length > 0) {
+      rawBlocks.push(currentBlock);
+    }
+
+    return rawBlocks
+      .map((blockLines, idx): Question | null => {
+        if (blockLines.length < 2) return null;
+        const promptParts: string[] = [];
+        const opts: [string, string, string, string] = ['', '', '', ''];
+        let answerStr = '';
+        let starredCorrectIdx = -1;
+        let seenAnyOption = false;
+
+        blockLines.forEach((line) => {
+          const ansMatch = line.match(
+            /^(?:answer|ans|correct(?:\s*answer)?|key)\s*[:=-]\s*(.+)$/i
+          );
+          if (ansMatch) {
+            answerStr = ansMatch[1].trim();
+            return;
+          }
+
+          const optMatch = line.match(
+            /^(\*)?\s*(?:[(]?([A-Da-d])[).:-])\s*(.+)$/
+          );
+          if (optMatch) {
+            seenAnyOption = true;
+            const isStarred = Boolean(optMatch[1]);
+            const letter = optMatch[2].toUpperCase();
+            const optText = optMatch[3].trim();
+            const letterIdx =
+              letter === 'A' ? 0 : letter === 'B' ? 1 : letter === 'C' ? 2 : 3;
+            opts[letterIdx] = optText;
+            if (isStarred) {
+              starredCorrectIdx = letterIdx;
+            }
+            return;
+          }
+
+          if (!seenAnyOption) {
+            promptParts.push(
+              line.replace(/^(?:Q(?:uestion)?\s*)?\d+\s*[.):-]\s*/i, '').trim()
+            );
+          }
+        });
+
+        // Fallback if plain lines without A./B./C./D. prefixes were pasted
+        if (!seenAnyOption && blockLines.length >= 3) {
+          const cleanStem = blockLines[0]
+            .replace(/^(?:Q(?:uestion)?\s*)?\d+\s*[.):-]\s*/i, '')
+            .trim();
+          opts[0] = blockLines[1] || 'Option A';
+          opts[1] = blockLines[2] || 'Option B';
+          opts[2] = blockLines[3] || 'None of the above';
+          opts[3] = blockLines[4] || 'All of the above';
+          const fallbackAns = blockLines[5] || 'A';
+          return {
+            id: `q-bulk-${Date.now()}-${idx}`,
+            subject: targetSubject,
+            bankId: targetBankId,
+            category: targetCategory,
+            questionText: cleanStem,
+            options: opts,
+            correctAnswer: resolveAnswerIndex(fallbackAns, opts),
+          };
+        }
+
+        const finalPrompt = promptParts.join(' ').trim();
+        if (!finalPrompt) return null;
+
+        const finalOptions: [string, string, string, string] = [
+          opts[0] || 'Option A',
+          opts[1] || 'Option B',
+          opts[2] || 'None of the above',
+          opts[3] || 'All of the above',
+        ];
+        const finalCorrect =
+          starredCorrectIdx >= 0
+            ? starredCorrectIdx
+            : resolveAnswerIndex(answerStr || 'A', finalOptions);
+
+        return {
+          id: `q-bulk-${Date.now()}-${idx}`,
+          subject: targetSubject,
+          bankId: targetBankId,
+          category: targetCategory,
+          questionText: finalPrompt,
+          options: finalOptions,
+          correctAnswer: finalCorrect,
+        };
+      })
+      .filter((q): q is Question => q !== null);
+  };
 
   // Subject Combinations (Categories) derived from settings
   const subjectCombinations: SubjectCombinationConfig[] = useMemo(() => {
@@ -3731,153 +4152,988 @@ SET value = EXCLUDED.value,
             {/* Bottom Card: ALL QUESTION BANKS IN SELECTED SUBJECT */}
             {!openedBankId ? (
               <section className="p-6 rounded-2xl border border-neutral-200 bg-white text-black shadow-xs space-y-5">
-                <div className="space-y-1">
-                  <div className="flex items-center gap-2 text-xs font-extrabold uppercase tracking-wider text-[#0a6b3c]">
-                    <Layers className="w-4 h-4" />
-                    <span>{qSubject.toUpperCase()} QUESTION BANKS</span>
+                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+                  <div className="space-y-1">
+                    <div className="flex items-center gap-2 text-xs font-extrabold uppercase tracking-wider text-[#0a6b3c]">
+                      <Layers className="w-4 h-4" />
+                      <span>{qSubject.toUpperCase()} QUESTION BANKS</span>
+                    </div>
+                    <h2 className="text-xl font-extrabold text-black">
+                      Create or Choose a Question Bank in {qSubject}
+                    </h2>
+                    <p className="text-xs text-neutral-500">
+                      Click on an existing {qSubject} question bank below (or create a new one) to upload bulk questions, delete bulk questions, or edit individual questions and upload question images.
+                    </p>
                   </div>
-                  <h2 className="text-xl font-extrabold text-black">
-                    All Question Banks in {qSubject}
-                  </h2>
-                  <p className="text-xs text-neutral-500">
-                    Each subject can have unlimited question banks (e.g. Reproduction, Circular Motion, Cell Division). Click any bank to manage its questions.
-                  </p>
-                </div>
 
-                <div className="flex flex-wrap items-center gap-3">
-                  <button
-                    type="button"
-                    onClick={() => {
-                      const banksForSubj = questionBanks.filter((b) => b.subject === qSubject);
-                      if (banksForSubj[0]) {
-                        setOpenedBankId(banksForSubj[0].id);
-                      } else {
-                        setShowAddBankModal(true);
-                      }
-                    }}
-                    className="px-4 py-2.5 rounded-xl border border-neutral-300 hover:border-[#0a6b3c] bg-white text-black text-xs font-extrabold inline-flex items-center gap-2 cursor-pointer"
-                  >
-                    <Upload className="w-3.5 h-3.5 text-[#0a6b3c]" />
-                    <span>Upload Questions</span>
-                  </button>
+                  <div className="flex flex-wrap items-center gap-2.5 shrink-0">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        const banksForSubj = questionBanks.filter(
+                          (b) => b.subject.trim().toLowerCase() === qSubject.trim().toLowerCase()
+                        );
+                        if (banksForSubj[0]) {
+                          setOpenedBankId(banksForSubj[0].id);
+                          setSelectedQuestionIds([]);
+                          setPreviewedBulkQuestions([]);
+                        } else {
+                          setShowAddBankModal(true);
+                        }
+                      }}
+                      className="px-4 py-2.5 rounded-xl border-2 border-[#0a6b3c] hover:bg-[#0a6b3c]/10 bg-white text-[#0a6b3c] text-xs font-extrabold inline-flex items-center gap-2 cursor-pointer"
+                    >
+                      <Upload className="w-3.5 h-3.5" />
+                      <span>Upload Bulk Questions</span>
+                    </button>
 
-                  <button
-                    type="button"
-                    onClick={() => setShowAddBankModal(true)}
-                    className="px-5 py-2.5 rounded-xl bg-[#0a6b3c] hover:bg-[#0e8a4e] text-white text-xs font-extrabold inline-flex items-center gap-1.5 cursor-pointer shadow-xs"
-                  >
-                    <Plus className="w-3.5 h-3.5" />
-                    <span>+ Add New Question Bank</span>
-                  </button>
+                    <button
+                      type="button"
+                      onClick={() => setShowAddBankModal(true)}
+                      className="px-5 py-2.5 rounded-xl bg-[#0a6b3c] hover:bg-[#0e8a4e] text-white text-xs font-extrabold inline-flex items-center gap-1.5 cursor-pointer shadow-xs"
+                    >
+                      <Plus className="w-3.5 h-3.5" />
+                      <span>+ Create New Question Bank</span>
+                    </button>
+                  </div>
                 </div>
 
                 {/* Question Bank Cards List */}
-                <div className="space-y-4">
-                  {questionBanks
-                    .filter((b) => b.subject === qSubject)
-                    .map((bank, bIdx) => {
-                      const subjQuestions = questions.filter((q) => q.subject === qSubject);
-                      const qCount = bIdx === 0 ? subjQuestions.length : 0;
+                {questionBanks.filter(
+                  (b) => b.subject.trim().toLowerCase() === qSubject.trim().toLowerCase()
+                ).length === 0 ? (
+                  <div className="p-8 rounded-2xl border-2 border-dashed border-neutral-300 bg-neutral-50 text-center space-y-3">
+                    <div className="w-12 h-12 rounded-2xl bg-[#0a6b3c]/10 text-[#0a6b3c] flex items-center justify-center mx-auto">
+                      <Folder className="w-6 h-6" />
+                    </div>
+                    <div className="space-y-1">
+                      <h3 className="text-sm font-extrabold text-black">
+                        No Question Bank Created for {qSubject} Yet
+                      </h3>
+                      <p className="text-xs text-neutral-500 max-w-md mx-auto">
+                        Create a question bank under {qSubject} to start uploading bulk questions or adding questions with images.
+                      </p>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => setShowAddBankModal(true)}
+                      className="px-5 py-2.5 rounded-xl bg-[#0a6b3c] hover:bg-[#0e8a4e] text-white text-xs font-extrabold inline-flex items-center gap-1.5 cursor-pointer shadow-xs"
+                    >
+                      <Plus className="w-4 h-4" />
+                      <span>+ Create First Question Bank for {qSubject}</span>
+                    </button>
+                  </div>
+                ) : (
+                  <div className="space-y-4">
+                    {questionBanks
+                      .filter(
+                        (b) =>
+                          b.subject.trim().toLowerCase() === qSubject.trim().toLowerCase()
+                      )
+                      .map((bank) => {
+                        const bankQuestions = getQuestionsForBank(qSubject, bank.id);
+                        const qCount = bankQuestions.length;
 
-                      return (
-                        <div
-                          key={bank.id}
-                          className="p-5 rounded-2xl border border-neutral-200 bg-white space-y-4 shadow-2xs"
-                        >
-                          <div className="flex items-center justify-between gap-3">
-                            <div className="flex items-center gap-3">
-                              <div className="w-10 h-10 rounded-xl bg-[#0a6b3c]/10 text-[#0a6b3c] flex items-center justify-center shrink-0">
-                                <Folder className="w-5 h-5" />
+                        return (
+                          <div
+                            key={bank.id}
+                            className="p-5 rounded-2xl border border-neutral-200 hover:border-[#0a6b3c] bg-white space-y-4 shadow-2xs transition-colors"
+                          >
+                            <div className="flex items-center justify-between gap-3">
+                              <div
+                                onClick={() => {
+                                  setOpenedBankId(bank.id);
+                                  setSelectedQuestionIds([]);
+                                  setPreviewedBulkQuestions([]);
+                                }}
+                                className="flex items-center gap-3 cursor-pointer"
+                              >
+                                <div className="w-10 h-10 rounded-xl bg-[#0a6b3c]/10 text-[#0a6b3c] flex items-center justify-center shrink-0">
+                                  <Folder className="w-5 h-5" />
+                                </div>
+                                <div>
+                                  <h3 className="text-sm font-extrabold text-black hover:text-[#0a6b3c] transition-colors">
+                                    {bank.title}
+                                  </h3>
+                                  <span className="text-[11px] font-semibold text-neutral-500">
+                                    Subject: {bank.subject}
+                                  </span>
+                                </div>
                               </div>
-                              <h3 className="text-sm font-extrabold text-black">
-                                {bank.title}
-                              </h3>
+
+                              <span className="px-3 py-1 rounded-full bg-[#0a6b3c] text-white font-mono text-xs font-extrabold tabular-nums">
+                                {qCount} Qs
+                              </span>
                             </div>
 
-                            <span className="px-3 py-1 rounded-full bg-[#0a6b3c] text-white font-mono text-xs font-extrabold tabular-nums">
-                              {qCount} Qs
+                            <p className="text-xs text-neutral-600">{bank.description}</p>
+
+                            <div className="pt-3 border-t border-neutral-100 flex flex-wrap items-center justify-between gap-3">
+                              <div className="flex items-center gap-2">
+                                <button
+                                  type="button"
+                                  onClick={() => setEditingBankItem({ ...bank })}
+                                  className="px-3 py-1.5 rounded-lg border border-neutral-300 hover:border-[#0a6b3c] text-neutral-700 hover:text-[#0a6b3c] text-xs font-bold inline-flex items-center gap-1.5 cursor-pointer"
+                                  title="Edit Question Bank Name & Description"
+                                >
+                                  <Edit3 className="w-3.5 h-3.5" />
+                                  <span>Edit Bank</span>
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    const qsInBank = getQuestionsForBank(qSubject, bank.id);
+                                    const idsToRemove = qsInBank.map((q) => q.id);
+                                    if (idsToRemove.length > 0) {
+                                      if (onDeleteQuestionsBulk) {
+                                        onDeleteQuestionsBulk(idsToRemove);
+                                      } else {
+                                        idsToRemove.forEach((id) => onDeleteQuestion(id));
+                                      }
+                                    }
+                                    const nextBanks = questionBanks.filter(
+                                      (item) => item.id !== bank.id
+                                    );
+                                    syncQuestionBanksToSettings(
+                                      nextBanks,
+                                      questions.filter((q) => !idsToRemove.includes(q.id))
+                                    );
+                                    triggerToast(
+                                      `Deleted question bank "${bank.title}" from ${qSubject}.`
+                                    );
+                                  }}
+                                  className="px-3 py-1.5 rounded-lg border border-red-200 bg-red-50 hover:bg-red-100 text-red-600 text-xs font-bold inline-flex items-center gap-1.5 cursor-pointer"
+                                  title="Delete Question Bank"
+                                >
+                                  <Trash2 className="w-3.5 h-3.5" />
+                                  <span>Delete Bank</span>
+                                </button>
+                              </div>
+
+                              <div className="flex items-center gap-2">
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    setOpenedBankId(bank.id);
+                                    setSelectedQuestionIds([]);
+                                    setPreviewedBulkQuestions([]);
+                                  }}
+                                  className="px-4 py-2 rounded-full border border-[#0a6b3c] text-[#0a6b3c] hover:bg-[#0a6b3c]/10 text-xs font-extrabold inline-flex items-center gap-1.5 transition-colors cursor-pointer"
+                                >
+                                  <Upload className="w-3.5 h-3.5" />
+                                  <span>Upload Bulk Questions</span>
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    setOpenedBankId(bank.id);
+                                    setSelectedQuestionIds([]);
+                                    setPreviewedBulkQuestions([]);
+                                  }}
+                                  className="px-4 py-2 rounded-full bg-neutral-900 hover:bg-[#0a6b3c] text-white text-xs font-extrabold inline-flex items-center gap-1.5 transition-colors cursor-pointer"
+                                >
+                                  <span>Open Bank ({qCount} Qs)</span>
+                                  <ArrowRight className="w-3.5 h-3.5" />
+                                </button>
+                              </div>
+                            </div>
+                          </div>
+                        );
+                      })}
+                  </div>
+                )}
+              </section>
+            ) : (
+              /* Inside an Opened Question Bank: Bulk Upload, Add Single Question, Bulk Delete & Edit Questions */
+              (() => {
+                const banksForSubject = questionBanks.filter(
+                  (b) => b.subject.trim().toLowerCase() === qSubject.trim().toLowerCase()
+                );
+                const activeBank =
+                  questionBanks.find((b) => b.id === openedBankId) ||
+                  banksForSubject[0] || {
+                    id: openedBankId,
+                    subject: qSubject,
+                    title: `${qSubject} Question Bank`,
+                    description: `Questions for ${qSubject}`,
+                  };
+                const bankQuestions = getQuestionsForBank(qSubject, activeBank.id);
+                const filteredBankQuestions = bankQuestions.filter((q) => {
+                  if (!bankQuestionSearch.trim()) return true;
+                  const s = bankQuestionSearch.toLowerCase();
+                  return (
+                    q.questionText.toLowerCase().includes(s) ||
+                    q.options.some((opt) => opt.toLowerCase().includes(s))
+                  );
+                });
+
+                const handleCommitBulkQuestions = () => {
+                  const parsed =
+                    previewedBulkQuestions.length > 0
+                      ? previewedBulkQuestions
+                      : parseBulkQuestionsInput(
+                          bulkQuestionsText,
+                          qSubject,
+                          activeBank.id,
+                          bulkQuestionsCategory
+                        );
+                  if (parsed.length === 0) {
+                    triggerToast(
+                      'No valid questions found to upload. Please check the format and try again.'
+                    );
+                    return;
+                  }
+                  if (onAddQuestionsBulk) {
+                    onAddQuestionsBulk(parsed);
+                  } else {
+                    parsed.forEach((q) => onAddQuestion(q));
+                  }
+                  syncQuestionBanksToSettings(questionBanks, [...parsed, ...questions]);
+                  setPreviewedBulkQuestions([]);
+                  triggerToast(
+                    `Uploaded ${parsed.length} bulk question(s) into "${activeBank.title}" (${qSubject})!`
+                  );
+                };
+
+                const handleBulkDeleteSelectedQuestions = () => {
+                  if (selectedQuestionIds.length === 0) return;
+                  const count = selectedQuestionIds.length;
+                  if (onDeleteQuestionsBulk) {
+                    onDeleteQuestionsBulk(selectedQuestionIds);
+                  } else {
+                    selectedQuestionIds.forEach((id) => onDeleteQuestion(id));
+                  }
+                  const remainingQs = questions.filter(
+                    (q) => !selectedQuestionIds.includes(q.id)
+                  );
+                  syncQuestionBanksToSettings(questionBanks, remainingQs);
+                  setSelectedQuestionIds([]);
+                  triggerToast(
+                    `Deleted ${count} selected question(s) from "${activeBank.title}".`
+                  );
+                };
+
+                const handleDeleteAllQuestionsInBank = () => {
+                  if (bankQuestions.length === 0) return;
+                  const ids = bankQuestions.map((q) => q.id);
+                  if (onDeleteQuestionsBulk) {
+                    onDeleteQuestionsBulk(ids);
+                  } else {
+                    ids.forEach((id) => onDeleteQuestion(id));
+                  }
+                  const remainingQs = questions.filter((q) => !ids.includes(q.id));
+                  syncQuestionBanksToSettings(questionBanks, remainingQs);
+                  setSelectedQuestionIds([]);
+                  triggerToast(
+                    `Deleted all ${ids.length} question(s) in "${activeBank.title}" (${qSubject}).`
+                  );
+                };
+
+                return (
+                  <div className="space-y-6">
+                    {/* Top Bank Navigation & Switcher Bar */}
+                    <div className="p-4 rounded-2xl border border-neutral-200 bg-white flex flex-wrap items-center justify-between gap-3 shadow-2xs">
+                      <div className="flex flex-wrap items-center gap-3">
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setOpenedBankId(null);
+                            setSelectedQuestionIds([]);
+                            setPreviewedBulkQuestions([]);
+                          }}
+                          className="px-4 py-2 rounded-xl border border-neutral-300 hover:border-[#0a6b3c] text-xs font-extrabold text-black inline-flex items-center gap-1.5 cursor-pointer"
+                        >
+                          <ArrowLeft className="w-3.5 h-3.5 text-[#0a6b3c]" />
+                          <span>Back to {qSubject} Banks</span>
+                        </button>
+
+                        <div className="flex items-center gap-2">
+                          <span className="text-xs font-extrabold text-neutral-500">
+                            Active {qSubject} Bank:
+                          </span>
+                          <select
+                            value={activeBank.id}
+                            onChange={(e) => {
+                              setOpenedBankId(e.target.value);
+                              setSelectedQuestionIds([]);
+                              setPreviewedBulkQuestions([]);
+                            }}
+                            className="px-3.5 py-2 rounded-xl border-2 border-[#0a6b3c] bg-[#0a6b3c]/5 text-xs font-extrabold text-[#0a6b3c] cursor-pointer focus:outline-none"
+                          >
+                            {banksForSubject.map((b) => (
+                              <option key={b.id} value={b.id} className="bg-white text-black">
+                                {b.title} ({getQuestionsForBank(qSubject, b.id).length} Qs)
+                              </option>
+                            ))}
+                          </select>
+                        </div>
+                      </div>
+
+                      <div className="flex flex-wrap items-center gap-2">
+                        <button
+                          type="button"
+                          onClick={() => setShowAddBankModal(true)}
+                          className="px-3.5 py-2 rounded-xl bg-[#0a6b3c] hover:bg-[#0e8a4e] text-white text-xs font-extrabold inline-flex items-center gap-1.5 cursor-pointer"
+                        >
+                          <Plus className="w-3.5 h-3.5" />
+                          <span>+ Create New Bank in {qSubject}</span>
+                        </button>
+
+                        <button
+                          type="button"
+                          onClick={() => {
+                            const idsToRemove = bankQuestions.map((q) => q.id);
+                            if (idsToRemove.length > 0) {
+                              if (onDeleteQuestionsBulk) {
+                                onDeleteQuestionsBulk(idsToRemove);
+                              } else {
+                                idsToRemove.forEach((id) => onDeleteQuestion(id));
+                              }
+                            }
+                            const nextBanks = questionBanks.filter(
+                              (item) => item.id !== activeBank.id
+                            );
+                            syncQuestionBanksToSettings(
+                              nextBanks,
+                              questions.filter((q) => !idsToRemove.includes(q.id))
+                            );
+                            setOpenedBankId(null);
+                            triggerToast(
+                              `Deleted question bank "${activeBank.title}" from ${qSubject}.`
+                            );
+                          }}
+                          className="px-3.5 py-2 rounded-xl border border-red-200 bg-red-50 hover:bg-red-100 text-red-600 text-xs font-extrabold inline-flex items-center gap-1.5 cursor-pointer"
+                        >
+                          <Trash2 className="w-3.5 h-3.5" />
+                          <span>Delete This Bank</span>
+                        </button>
+                      </div>
+                    </div>
+
+                    {/* BULK UPLOAD QUESTIONS SECTION */}
+                    <section className="p-6 rounded-2xl border-2 border-[#0a6b3c] bg-white text-black shadow-xs space-y-4">
+                      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                        <div>
+                          <span className="text-[11px] font-extrabold uppercase tracking-wider text-[#0a6b3c]">
+                            BULK QUESTION UPLOAD • {qSubject.toUpperCase()} ({activeBank.title})
+                          </span>
+                          <h2 className="text-base md:text-lg font-extrabold text-black mt-0.5">
+                            Upload Bulk Questions to &ldquo;{activeBank.title}&rdquo;
+                          </h2>
+                          <p className="text-xs text-neutral-500 mt-0.5">
+                            Paste multiple questions below (Numbered A/B/C/D blocks or{' '}
+                            <code className="font-mono font-bold text-[#0a6b3c]">
+                              Question | Option A | Option B | Option C | Option D | Answer
+                            </code>
+                            ) or upload a <code className="font-mono font-bold">.txt</code>,{' '}
+                            <code className="font-mono font-bold">.csv</code>, or{' '}
+                            <code className="font-mono font-bold">.json</code> file.
+                          </p>
+                        </div>
+
+                        <div className="flex flex-wrap items-center gap-2 shrink-0">
+                          <select
+                            value={bulkQuestionsCategory}
+                            onChange={(e) =>
+                              setBulkQuestionsCategory(
+                                e.target.value as CategoryType | 'All'
+                              )
+                            }
+                            className="px-3 py-2 rounded-xl border border-neutral-300 text-xs font-extrabold text-black bg-white"
+                          >
+                            <option value="All">Category: All Categories</option>
+                            {subjectCombinations.map((combo) => (
+                              <option key={combo.id} value={combo.name}>
+                                Category: {combo.name}
+                              </option>
+                            ))}
+                          </select>
+
+                          <label className="px-3.5 py-2 rounded-xl border-2 border-[#0a6b3c] text-[#0a6b3c] hover:bg-[#0a6b3c]/10 text-xs font-extrabold inline-flex items-center gap-1.5 cursor-pointer">
+                            <Upload className="w-3.5 h-3.5" />
+                            <span>Upload File (.txt / .csv / .json)</span>
+                            <input
+                              type="file"
+                              accept=".txt,.csv,.json"
+                              className="hidden"
+                              onChange={(e) => {
+                                const file = e.target.files?.[0];
+                                if (!file) return;
+                                const reader = new FileReader();
+                                reader.onload = () => {
+                                  const text =
+                                    typeof reader.result === 'string'
+                                      ? reader.result
+                                      : '';
+                                  if (text) {
+                                    setBulkQuestionsText(text);
+                                    const parsed = parseBulkQuestionsInput(
+                                      text,
+                                      qSubject,
+                                      activeBank.id,
+                                      bulkQuestionsCategory
+                                    );
+                                    setPreviewedBulkQuestions(parsed);
+                                    triggerToast(
+                                      `Loaded ${parsed.length} question(s) from "${file.name}". Click "Upload Bulk Questions to Bank" to save.`
+                                    );
+                                  }
+                                };
+                                reader.readAsText(file);
+                                e.target.value = '';
+                              }}
+                            />
+                          </label>
+                        </div>
+                      </div>
+
+                      <textarea
+                        rows={7}
+                        value={bulkQuestionsText}
+                        onChange={(e) => setBulkQuestionsText(e.target.value)}
+                        placeholder={`Paste bulk questions here...\nExample 1 (Multi-line):\n1. Question text here?\nA. First option\nB. Second option\nC. Third option\nD. Fourth option\nAnswer: B\n\nExample 2 (Pipe format):\nQuestion text | Option A | Option B | Option C | Option D | B`}
+                        className="w-full p-4 rounded-xl border border-neutral-300 focus:border-[#0a6b3c] focus:outline-none font-mono text-xs text-black bg-neutral-50"
+                      />
+
+                      <div className="flex flex-wrap items-center justify-between gap-3">
+                        <div className="flex flex-wrap items-center gap-2.5">
+                          <button
+                            type="button"
+                            onClick={() => {
+                              const parsed = parseBulkQuestionsInput(
+                                bulkQuestionsText,
+                                qSubject,
+                                activeBank.id,
+                                bulkQuestionsCategory
+                              );
+                              setPreviewedBulkQuestions(parsed);
+                            }}
+                            className="px-4 py-2.5 rounded-xl border-2 border-[#0a6b3c] text-[#0a6b3c] hover:bg-[#0a6b3c]/10 text-xs font-extrabold transition-colors cursor-pointer"
+                          >
+                            Preview Bulk Questions
+                          </button>
+
+                          <button
+                            type="button"
+                            onClick={handleCommitBulkQuestions}
+                            className="px-5 py-2.5 rounded-xl bg-[#0a6b3c] hover:bg-[#0e8a4e] text-white text-xs font-extrabold inline-flex items-center gap-1.5 transition-colors cursor-pointer shadow-xs"
+                          >
+                            <Upload className="w-3.5 h-3.5" />
+                            <span>
+                              Upload Bulk Questions to &ldquo;{activeBank.title}&rdquo;
                             </span>
+                          </button>
+                        </div>
+
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setBulkQuestionsText('');
+                            setPreviewedBulkQuestions([]);
+                          }}
+                          className="text-xs font-bold text-neutral-500 hover:text-black cursor-pointer"
+                        >
+                          Clear Textbox
+                        </button>
+                      </div>
+
+                      {previewedBulkQuestions.length > 0 && (
+                        <div className="p-4 rounded-xl bg-[#0a6b3c]/5 border border-[#0a6b3c] space-y-2.5">
+                          <div className="flex items-center justify-between">
+                            <span className="text-xs font-extrabold text-[#0a6b3c]">
+                              Previewed {previewedBulkQuestions.length} Question(s) Ready for &ldquo;{activeBank.title}&rdquo;:
+                            </span>
+                            <button
+                              type="button"
+                              onClick={handleCommitBulkQuestions}
+                              className="px-3.5 py-1.5 rounded-lg bg-[#0a6b3c] text-white text-xs font-extrabold cursor-pointer"
+                            >
+                              Confirm &amp; Save All ({previewedBulkQuestions.length})
+                            </button>
+                          </div>
+                          <div className="max-h-56 overflow-y-auto space-y-2 pr-1">
+                            {previewedBulkQuestions.map((pq, idx) => (
+                              <div
+                                key={pq.id}
+                                className="p-3 rounded-lg bg-white border border-neutral-200 text-xs space-y-1"
+                              >
+                                <div className="font-extrabold text-black">
+                                  {idx + 1}. {pq.questionText}
+                                </div>
+                                <div className="flex flex-wrap gap-2 text-[11px] text-neutral-600">
+                                  {pq.options.map((opt, oIdx) => (
+                                    <span
+                                      key={oIdx}
+                                      className={
+                                        pq.correctAnswer === oIdx
+                                          ? 'font-extrabold text-[#0a6b3c]'
+                                          : ''
+                                      }
+                                    >
+                                      {['A', 'B', 'C', 'D'][oIdx]}. {opt}
+                                      {pq.correctAnswer === oIdx ? ' ✓' : ''}
+                                    </span>
+                                  ))}
+                                </div>
+                              </div>
+                            ))}
+                          </div>
+                        </div>
+                      )}
+                    </section>
+
+                    <div className="grid grid-cols-1 lg:grid-cols-12 gap-8 items-start">
+                      {/* Left Column: Add Single Question with Image Upload */}
+                      <div className="lg:col-span-5 p-6 rounded-2xl border border-neutral-200 bg-white text-black space-y-4">
+                        <div>
+                          <span className="text-[10px] font-extrabold uppercase tracking-wider text-[#0a6b3c]">
+                            ADD SINGLE QUESTION
+                          </span>
+                          <h2 className="text-base font-extrabold text-black">
+                            Add Question to &ldquo;{activeBank.title}&rdquo;
+                          </h2>
+                        </div>
+
+                        <div className="grid grid-cols-2 gap-3">
+                          <div>
+                            <label className="block text-xs font-bold text-neutral-700 mb-1">
+                              Subject
+                            </label>
+                            <input
+                              type="text"
+                              readOnly
+                              value={qSubject}
+                              className="w-full px-3 py-2 rounded-lg border border-neutral-300 text-xs font-bold text-black bg-neutral-50"
+                            />
+                          </div>
+                          <div>
+                            <label className="block text-xs font-bold text-neutral-700 mb-1">
+                              Category
+                            </label>
+                            <select
+                              value={qCategory}
+                              onChange={(e) =>
+                                setQCategory(e.target.value as CategoryType | 'All')
+                              }
+                              className="w-full px-3 py-2 rounded-lg border border-neutral-300 text-xs font-bold text-black bg-white"
+                            >
+                              <option value="All">All Categories</option>
+                              {subjectCombinations.map((combo) => (
+                                <option key={combo.id} value={combo.name}>
+                                  {combo.name}
+                                </option>
+                              ))}
+                            </select>
+                          </div>
+                        </div>
+
+                        <div>
+                          <label className="block text-xs font-bold text-neutral-700 mb-1">
+                            Question Prompt
+                          </label>
+                          <textarea
+                            rows={3}
+                            value={qText}
+                            onChange={(e) => setQText(e.target.value)}
+                            placeholder="Enter the question stem..."
+                            className="w-full p-3 rounded-lg border border-neutral-300 text-xs text-black"
+                          />
+                        </div>
+
+                        {/* Optional Image Upload for Question */}
+                        <div className="p-3.5 rounded-xl bg-neutral-50 border border-neutral-200 space-y-2.5">
+                          <div className="flex items-center justify-between">
+                            <span className="text-xs font-extrabold text-neutral-700">
+                              Question Image / Diagram (Optional)
+                            </span>
+                            <label className="px-3 py-1.5 rounded-lg bg-[#0a6b3c]/10 hover:bg-[#0a6b3c]/20 text-[#0a6b3c] text-xs font-extrabold inline-flex items-center gap-1.5 cursor-pointer">
+                              <Upload className="w-3.5 h-3.5" />
+                              <span>{qImageUrl ? 'Change Image' : 'Upload Image'}</span>
+                              <input
+                                type="file"
+                                accept="image/*"
+                                className="hidden"
+                                onChange={(e) => {
+                                  const file = e.target.files?.[0];
+                                  if (!file) return;
+                                  readQuestionImageFile(file, (dataUrl) => {
+                                    setQImageUrl(dataUrl);
+                                  });
+                                  e.target.value = '';
+                                }}
+                              />
+                            </label>
                           </div>
 
-                          <p className="text-xs text-neutral-600">{bank.description}</p>
-
-                          <div className="pt-3 border-t border-neutral-100 flex items-center justify-between">
-                            <div className="flex items-center gap-3 text-neutral-400">
+                          {qImageUrl && (
+                            <div className="space-y-2">
+                              <div className="rounded-lg border border-neutral-200 bg-white p-2 flex items-center justify-center max-h-44 overflow-hidden">
+                                <img
+                                  src={qImageUrl}
+                                  alt="Question preview"
+                                  className="max-h-40 w-auto object-contain rounded"
+                                />
+                              </div>
                               <button
                                 type="button"
-                                onClick={() => setOpenedBankId(bank.id)}
-                                className="hover:text-[#0a6b3c] cursor-pointer"
-                                title="Edit Bank"
+                                onClick={() => setQImageUrl('')}
+                                className="text-xs font-bold text-red-600 hover:underline inline-flex items-center gap-1 cursor-pointer"
                               >
-                                <Edit3 className="w-4 h-4" />
-                              </button>
-                              <button
-                                type="button"
-                                onClick={() =>
-                                  setQuestionBanks((prev) =>
-                                    prev.filter((item) => item.id !== bank.id)
-                                  )
-                                }
-                                className="hover:text-red-600 cursor-pointer"
-                                title="Delete Bank"
-                              >
-                                <Trash2 className="w-4 h-4" />
+                                <Trash2 className="w-3 h-3" />
+                                <span>Remove Image</span>
                               </button>
                             </div>
+                          )}
+                        </div>
+
+                        <div className="space-y-2">
+                          <label className="block text-xs font-bold text-neutral-700">
+                            Options (Select radio button for the Correct Answer)
+                          </label>
+                          {[
+                            { label: 'Option A', val: qOptA, set: setQOptA },
+                            { label: 'Option B', val: qOptB, set: setQOptB },
+                            { label: 'Option C', val: qOptC, set: setQOptC },
+                            { label: 'Option D', val: qOptD, set: setQOptD },
+                          ].map((opt, idx) => (
+                            <div key={idx} className="flex items-center gap-2">
+                              <input
+                                type="radio"
+                                name="correctOpt"
+                                checked={qCorrect === idx}
+                                onChange={() => setQCorrect(idx)}
+                                className="accent-[#0a6b3c] w-4 h-4 cursor-pointer"
+                              />
+                              <input
+                                type="text"
+                                value={opt.val}
+                                onChange={(e) => opt.set(e.target.value)}
+                                placeholder={`${opt.label} (Select radio if correct)`}
+                                className="flex-1 px-3 py-2 rounded-lg border border-neutral-300 text-xs text-black"
+                              />
+                            </div>
+                          ))}
+                        </div>
+
+                        <button
+                          type="button"
+                          onClick={() => {
+                            if (!qText.trim() || !qOptA.trim() || !qOptB.trim()) {
+                              triggerToast(
+                                'Please enter the question prompt and at least Option A and Option B.'
+                              );
+                              return;
+                            }
+                            const newQ: Question = {
+                              id: `q-${Date.now()}`,
+                              subject: qSubject,
+                              bankId: activeBank.id,
+                              category: qCategory,
+                              questionText: qText.trim(),
+                              imageUrl: qImageUrl || undefined,
+                              options: [
+                                qOptA.trim(),
+                                qOptB.trim(),
+                                qOptC.trim() || 'None of the above',
+                                qOptD.trim() || 'All of the above',
+                              ],
+                              correctAnswer: qCorrect,
+                            };
+                            onAddQuestion(newQ);
+                            syncQuestionBanksToSettings(questionBanks, [
+                              newQ,
+                              ...questions,
+                            ]);
+                            setQText('');
+                            setQImageUrl('');
+                            setQOptA('');
+                            setQOptB('');
+                            setQOptC('');
+                            setQOptD('');
+                            triggerToast(
+                              `Added question to "${activeBank.title}" (${qSubject}).`
+                            );
+                          }}
+                          className="w-full py-2.5 px-4 rounded-xl bg-[#0a6b3c] hover:bg-[#0e8a4e] text-white text-xs font-extrabold uppercase tracking-wider cursor-pointer"
+                        >
+                          + Save Question to Bank
+                        </button>
+                      </div>
+
+                      {/* Right Column: Questions in Active Bank + Bulk Delete + Edit Question */}
+                      <div className="lg:col-span-7 p-6 rounded-2xl border border-neutral-200 bg-white text-black space-y-4">
+                        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-neutral-200 pb-3">
+                          <div>
+                            <h2 className="text-base font-extrabold text-black">
+                              {activeBank.title} — Questions ({bankQuestions.length})
+                            </h2>
+                            <p className="text-xs text-neutral-500">
+                              Select questions for bulk deletion, or click <strong>Edit</strong> on any question to edit options, question text, or upload an image.
+                            </p>
+                          </div>
+                        </div>
+
+                        {/* Search & Bulk Delete Toolbar */}
+                        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 bg-neutral-50 p-3 rounded-xl border border-neutral-200">
+                          <div className="flex items-center gap-3">
+                            <label className="inline-flex items-center gap-2 text-xs font-extrabold text-black cursor-pointer">
+                              <input
+                                type="checkbox"
+                                checked={
+                                  filteredBankQuestions.length > 0 &&
+                                  filteredBankQuestions.every((q) =>
+                                    selectedQuestionIds.includes(q.id)
+                                  )
+                                }
+                                onChange={() => {
+                                  const allVisibleIds = filteredBankQuestions.map(
+                                    (q) => q.id
+                                  );
+                                  const allSelected =
+                                    allVisibleIds.length > 0 &&
+                                    allVisibleIds.every((id) =>
+                                      selectedQuestionIds.includes(id)
+                                    );
+                                  if (allSelected) {
+                                    setSelectedQuestionIds((prev) =>
+                                      prev.filter((id) => !allVisibleIds.includes(id))
+                                    );
+                                  } else {
+                                    setSelectedQuestionIds((prev) =>
+                                      Array.from(new Set([...prev, ...allVisibleIds]))
+                                    );
+                                  }
+                                }}
+                                className="accent-[#0a6b3c] w-4 h-4 cursor-pointer"
+                              />
+                              <span>Select All ({filteredBankQuestions.length})</span>
+                            </label>
 
                             <button
                               type="button"
-                              onClick={() => setOpenedBankId(bank.id)}
-                              className="px-4 py-2 rounded-full bg-neutral-900 hover:bg-[#0a6b3c] text-white text-xs font-extrabold inline-flex items-center gap-1.5 transition-colors cursor-pointer"
+                              disabled={selectedQuestionIds.length === 0}
+                              onClick={handleBulkDeleteSelectedQuestions}
+                              className="px-3 py-1.5 rounded-lg bg-red-600 hover:bg-red-700 text-white text-xs font-extrabold inline-flex items-center gap-1.5 cursor-pointer disabled:opacity-40"
                             >
-                              <span>Open Bank</span>
-                              <ArrowRight className="w-3.5 h-3.5" />
+                              <Trash2 className="w-3.5 h-3.5" />
+                              <span>Delete Selected ({selectedQuestionIds.length})</span>
                             </button>
+
+                            {bankQuestions.length > 0 && (
+                              <button
+                                type="button"
+                                onClick={handleDeleteAllQuestionsInBank}
+                                className="px-3 py-1.5 rounded-lg border border-red-300 bg-red-50 hover:bg-red-100 text-red-700 text-xs font-extrabold inline-flex items-center gap-1 cursor-pointer"
+                              >
+                                <Trash2 className="w-3.5 h-3.5" />
+                                <span>Delete All ({bankQuestions.length})</span>
+                              </button>
+                            )}
+                          </div>
+
+                          <div className="relative flex-1 max-w-xs">
+                            <Search className="w-3.5 h-3.5 text-neutral-400 absolute left-3 top-1/2 -translate-y-1/2" />
+                            <input
+                              type="text"
+                              value={bankQuestionSearch}
+                              onChange={(e) => setBankQuestionSearch(e.target.value)}
+                              placeholder="Search questions..."
+                              className="w-full pl-8 pr-3 py-1.5 rounded-lg border border-neutral-300 bg-white text-xs text-black focus:border-[#0a6b3c] focus:outline-none"
+                            />
                           </div>
                         </div>
-                      );
-                    })}
-                </div>
-              </section>
-            ) : (
-              /* Inside an Opened Question Bank: Add & Manage Questions */
-              <div className="space-y-4">
-                <button
-                  type="button"
-                  onClick={() => setOpenedBankId(null)}
-                  className="px-4 py-2 rounded-xl border border-neutral-300 hover:border-[#0a6b3c] text-xs font-extrabold text-black inline-flex items-center gap-1.5 cursor-pointer"
-                >
-                  <ArrowLeft className="w-3.5 h-3.5 text-[#0a6b3c]" />
-                  <span>Back to {qSubject} Question Banks</span>
-                </button>
 
-                <div className="grid grid-cols-1 lg:grid-cols-12 gap-8 items-start">
-                  <div className="lg:col-span-5 p-6 rounded-2xl border border-neutral-200 bg-white text-black space-y-4">
-                    <h2 className="text-base font-extrabold text-black">
-                      Add Question to {qSubject}
-                    </h2>
+                        {/* Questions List */}
+                        {filteredBankQuestions.length === 0 ? (
+                          <div className="p-8 rounded-xl border border-dashed border-neutral-300 text-center text-xs font-bold text-neutral-500">
+                            No questions in &ldquo;{activeBank.title}&rdquo; yet. Use the Bulk Upload box above or Add Single Question on the left.
+                          </div>
+                        ) : (
+                          <div className="space-y-3 max-h-[650px] overflow-y-auto pr-1">
+                            {filteredBankQuestions.map((q, i) => {
+                              const isChecked = selectedQuestionIds.includes(q.id);
+                              return (
+                                <div
+                                  key={q.id}
+                                  className={`p-4 rounded-xl border transition-colors space-y-2.5 ${
+                                    isChecked
+                                      ? 'border-[#0a6b3c] bg-[#0a6b3c]/5'
+                                      : 'border-neutral-200 bg-neutral-50'
+                                  }`}
+                                >
+                                  <div className="flex items-center justify-between gap-2">
+                                    <div className="flex flex-wrap items-center gap-2">
+                                      <input
+                                        type="checkbox"
+                                        checked={isChecked}
+                                        onChange={() =>
+                                          setSelectedQuestionIds((prev) =>
+                                            prev.includes(q.id)
+                                              ? prev.filter((id) => id !== q.id)
+                                              : [...prev, q.id]
+                                          )
+                                        }
+                                        className="accent-[#0a6b3c] w-4 h-4 cursor-pointer"
+                                      />
+                                      <span className="px-2 py-0.5 rounded bg-[#0a6b3c] text-white font-mono text-[10px] font-bold">
+                                        #{i + 1} • {q.subject}
+                                      </span>
+                                      <span className="text-[11px] font-bold text-[#0a6b3c]">
+                                        Category: {q.category}
+                                      </span>
+                                      {q.imageUrl && (
+                                        <span className="px-2 py-0.5 rounded-full bg-[#0a6b3c]/15 text-[#0a6b3c] text-[10px] font-extrabold">
+                                          Image Attached
+                                        </span>
+                                      )}
+                                    </div>
+
+                                    <div className="flex items-center gap-1.5">
+                                      <button
+                                        type="button"
+                                        onClick={() =>
+                                          setEditingQuestion({
+                                            ...q,
+                                            bankId: q.bankId || activeBank.id,
+                                            options: [...q.options] as [
+                                              string,
+                                              string,
+                                              string,
+                                              string,
+                                            ],
+                                          })
+                                        }
+                                        className="px-2.5 py-1 rounded-lg border border-[#0a6b3c] bg-white hover:bg-[#0a6b3c] text-[#0a6b3c] hover:text-white text-xs font-extrabold inline-flex items-center gap-1 transition-colors cursor-pointer"
+                                        title="Edit Question, Options & Image"
+                                      >
+                                        <Edit3 className="w-3.5 h-3.5" />
+                                        <span>Edit</span>
+                                      </button>
+                                      <button
+                                        type="button"
+                                        onClick={() => {
+                                          onDeleteQuestion(q.id);
+                                          setSelectedQuestionIds((prev) =>
+                                            prev.filter((id) => id !== q.id)
+                                          );
+                                          syncQuestionBanksToSettings(
+                                            questionBanks,
+                                            questions.filter((item) => item.id !== q.id)
+                                          );
+                                        }}
+                                        className="p-1.5 rounded-lg border border-red-200 bg-red-50 hover:bg-red-100 text-red-600 cursor-pointer"
+                                        title="Delete Question"
+                                      >
+                                        <Trash2 className="w-3.5 h-3.5" />
+                                      </button>
+                                    </div>
+                                  </div>
+
+                                  <p className="text-xs font-bold text-black leading-relaxed">
+                                    {q.questionText}
+                                  </p>
+
+                                  {q.imageUrl && (
+                                    <div className="rounded-lg border border-neutral-200 bg-white p-2 flex items-center justify-center max-h-48 overflow-hidden">
+                                      <img
+                                        src={q.imageUrl}
+                                        alt={`Question #${i + 1}`}
+                                        className="max-h-44 w-auto object-contain rounded"
+                                      />
+                                    </div>
+                                  )}
+
+                                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-1.5 text-[11px]">
+                                    {q.options.map((opt, oIdx) => (
+                                      <div
+                                        key={oIdx}
+                                        className={`px-2.5 py-1.5 rounded ${
+                                          q.correctAnswer === oIdx
+                                            ? 'bg-[#0a6b3c] text-white font-bold'
+                                            : 'bg-white text-neutral-700 border border-neutral-200'
+                                        }`}
+                                      >
+                                        {['A', 'B', 'C', 'D'][oIdx]}. {opt}
+                                      </div>
+                                    ))}
+                                  </div>
+                                </div>
+                              );
+                            })}
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  </div>
+                );
+              })()
+            )}
+
+            {/* Edit Question Modal (Edit Question Text, Options A-D, Correct Answer, and Upload/Remove Image) */}
+            {editingQuestion && (
+              <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/65 p-4 overflow-y-auto">
+                <div className="w-full max-w-lg bg-white text-black rounded-2xl border-2 border-[#0a6b3c] p-6 space-y-4 shadow-2xl my-auto">
+                  <div className="flex items-center justify-between border-b border-neutral-200 pb-3">
+                    <div>
+                      <span className="text-[10px] font-extrabold uppercase tracking-wider text-[#0a6b3c]">
+                        EDIT QUESTION • {editingQuestion.subject.toUpperCase()}
+                      </span>
+                      <h3 className="text-base font-extrabold text-black">
+                        Edit Question, Options &amp; Question Image
+                      </h3>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => setEditingQuestion(null)}
+                      className="p-1.5 rounded-lg border border-neutral-300 hover:border-black text-neutral-600 cursor-pointer"
+                    >
+                      <X className="w-4 h-4" />
+                    </button>
+                  </div>
+
+                  <div className="space-y-3.5 text-xs">
                     <div className="grid grid-cols-2 gap-3">
                       <div>
-                        <label className="block text-xs font-bold text-neutral-700 mb-1">
-                          Subject
+                        <label className="block font-extrabold text-neutral-700 mb-1">
+                          Question Bank ({editingQuestion.subject})
                         </label>
-                        <input
-                          type="text"
-                          readOnly
-                          value={qSubject}
-                          className="w-full px-3 py-2 rounded-lg border border-neutral-300 text-xs font-bold text-black bg-neutral-50"
-                        />
+                        <select
+                          value={editingQuestion.bankId || ''}
+                          onChange={(e) =>
+                            setEditingQuestion({
+                              ...editingQuestion,
+                              bankId: e.target.value,
+                            })
+                          }
+                          className="w-full px-3 py-2 rounded-xl border border-neutral-300 font-bold text-black bg-white"
+                        >
+                          {questionBanks
+                            .filter(
+                              (b) =>
+                                b.subject.trim().toLowerCase() ===
+                                editingQuestion.subject.trim().toLowerCase()
+                            )
+                            .map((b) => (
+                              <option key={b.id} value={b.id}>
+                                {b.title}
+                              </option>
+                            ))}
+                        </select>
                       </div>
+
                       <div>
-                        <label className="block text-xs font-bold text-neutral-700 mb-1">
+                        <label className="block font-extrabold text-neutral-700 mb-1">
                           Category
                         </label>
                         <select
-                          value={qCategory}
+                          value={editingQuestion.category}
                           onChange={(e) =>
-                            setQCategory(e.target.value as CategoryType | 'All')
+                            setEditingQuestion({
+                              ...editingQuestion,
+                              category: e.target.value as CategoryType | 'All',
+                            })
                           }
-                          className="w-full px-3 py-2 rounded-lg border border-neutral-300 text-xs font-bold text-black bg-white"
+                          className="w-full px-3 py-2 rounded-xl border border-neutral-300 font-bold text-black bg-white"
                         >
                           <option value="All">All Categories</option>
                           {subjectCombinations.map((combo) => (
@@ -3890,123 +5146,255 @@ SET value = EXCLUDED.value,
                     </div>
 
                     <div>
-                      <label className="block text-xs font-bold text-neutral-700 mb-1">
-                        Question Prompt
+                      <label className="block font-extrabold text-neutral-700 mb-1">
+                        Question Text
                       </label>
                       <textarea
                         rows={3}
-                        value={qText}
-                        onChange={(e) => setQText(e.target.value)}
-                        placeholder="Enter the question stem..."
-                        className="w-full p-3 rounded-lg border border-neutral-300 text-xs text-black"
+                        value={editingQuestion.questionText}
+                        onChange={(e) =>
+                          setEditingQuestion({
+                            ...editingQuestion,
+                            questionText: e.target.value,
+                          })
+                        }
+                        className="w-full p-3 rounded-xl border border-neutral-300 focus:border-[#0a6b3c] focus:outline-none text-xs font-semibold text-black"
                       />
                     </div>
 
-                    <div className="space-y-2">
-                      {[
-                        { label: 'Option A', val: qOptA, set: setQOptA },
-                        { label: 'Option B', val: qOptB, set: setQOptB },
-                        { label: 'Option C', val: qOptC, set: setQOptC },
-                        { label: 'Option D', val: qOptD, set: setQOptD },
-                      ].map((opt, idx) => (
-                        <div key={idx} className="flex items-center gap-2">
-                          <input
-                            type="radio"
-                            name="correctOpt"
-                            checked={qCorrect === idx}
-                            onChange={() => setQCorrect(idx)}
-                            className="accent-[#0a6b3c]"
-                          />
-                          <input
-                            type="text"
-                            value={opt.val}
-                            onChange={(e) => opt.set(e.target.value)}
-                            placeholder={`${opt.label} (Select radio if correct)`}
-                            className="flex-1 px-3 py-2 rounded-lg border border-neutral-300 text-xs text-black"
-                          />
+                    {/* Upload / Change / Remove Image on Question */}
+                    <div className="p-3.5 rounded-xl bg-neutral-50 border border-neutral-200 space-y-2.5">
+                      <div className="flex items-center justify-between">
+                        <div>
+                          <span className="block font-extrabold text-black">
+                            Question Image / Diagram
+                          </span>
+                          <span className="text-[11px] text-neutral-500">
+                            Upload an image or diagram to display with this question.
+                          </span>
                         </div>
-                      ))}
+                        <label className="px-3.5 py-2 rounded-xl bg-[#0a6b3c] hover:bg-[#0e8a4e] text-white text-xs font-extrabold inline-flex items-center gap-1.5 cursor-pointer shrink-0">
+                          <Upload className="w-3.5 h-3.5" />
+                          <span>
+                            {editingQuestion.imageUrl ? 'Change Image' : 'Upload Image'}
+                          </span>
+                          <input
+                            type="file"
+                            accept="image/*"
+                            className="hidden"
+                            onChange={(e) => {
+                              const file = e.target.files?.[0];
+                              if (!file) return;
+                              readQuestionImageFile(file, (dataUrl) => {
+                                setEditingQuestion((prev) =>
+                                  prev ? { ...prev, imageUrl: dataUrl } : prev
+                                );
+                              });
+                              e.target.value = '';
+                            }}
+                          />
+                        </label>
+                      </div>
+
+                      {editingQuestion.imageUrl && (
+                        <div className="space-y-2">
+                          <div className="rounded-xl border border-neutral-200 bg-white p-2 flex items-center justify-center max-h-52 overflow-hidden">
+                            <img
+                              src={editingQuestion.imageUrl}
+                              alt="Question illustration"
+                              className="max-h-48 w-auto object-contain rounded"
+                            />
+                          </div>
+                          <button
+                            type="button"
+                            onClick={() =>
+                              setEditingQuestion({
+                                ...editingQuestion,
+                                imageUrl: undefined,
+                              })
+                            }
+                            className="px-3 py-1 rounded-lg border border-red-200 bg-red-50 hover:bg-red-100 text-red-600 text-xs font-bold inline-flex items-center gap-1 cursor-pointer"
+                          >
+                            <Trash2 className="w-3.5 h-3.5" />
+                            <span>Remove Image from Question</span>
+                          </button>
+                        </div>
+                      )}
                     </div>
 
+                    {/* Edit Options A, B, C, D & Correct Answer */}
+                    <div className="space-y-2">
+                      <label className="block font-extrabold text-neutral-700">
+                        Edit Options &amp; Select Correct Answer (A–D)
+                      </label>
+                      {(['A', 'B', 'C', 'D'] as const).map((letter, idx) => {
+                        const isCorrectOpt = editingQuestion.correctAnswer === idx;
+                        return (
+                          <div
+                            key={letter}
+                            className={`flex items-center gap-2.5 p-2 rounded-xl border ${
+                              isCorrectOpt
+                                ? 'border-[#0a6b3c] bg-[#0a6b3c]/5'
+                                : 'border-neutral-200 bg-white'
+                            }`}
+                          >
+                            <input
+                              type="radio"
+                              name="editQuestionCorrectAnswer"
+                              checked={isCorrectOpt}
+                              onChange={() =>
+                                setEditingQuestion({
+                                  ...editingQuestion,
+                                  correctAnswer: idx,
+                                })
+                              }
+                              className="accent-[#0a6b3c] w-4 h-4 cursor-pointer"
+                              title={`Mark Option ${letter} as Correct Answer`}
+                            />
+                            <span className="font-mono font-extrabold text-xs text-[#0a6b3c] w-5">
+                              {letter}.
+                            </span>
+                            <input
+                              type="text"
+                              value={editingQuestion.options[idx] || ''}
+                              onChange={(e) => {
+                                const nextOpts = [...editingQuestion.options] as [
+                                  string,
+                                  string,
+                                  string,
+                                  string,
+                                ];
+                                nextOpts[idx] = e.target.value;
+                                setEditingQuestion({
+                                  ...editingQuestion,
+                                  options: nextOpts,
+                                });
+                              }}
+                              className="flex-1 px-3 py-1.5 rounded-lg border border-neutral-300 text-xs font-semibold text-black bg-white focus:border-[#0a6b3c] focus:outline-none"
+                            />
+                            {isCorrectOpt && (
+                              <span className="px-2 py-0.5 rounded bg-[#0a6b3c] text-white text-[10px] font-extrabold shrink-0">
+                                Correct
+                              </span>
+                            )}
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </div>
+
+                  <div className="flex justify-end gap-2 pt-2 border-t border-neutral-200">
+                    <button
+                      type="button"
+                      onClick={() => setEditingQuestion(null)}
+                      className="px-4 py-2 rounded-xl border border-neutral-300 text-xs font-bold cursor-pointer"
+                    >
+                      Cancel
+                    </button>
                     <button
                       type="button"
                       onClick={() => {
-                        if (!qText.trim() || !qOptA.trim() || !qOptB.trim()) return;
-                        onAddQuestion({
-                          id: `q-${Date.now()}`,
-                          subject: qSubject,
-                          category: qCategory,
-                          questionText: qText.trim(),
+                        if (!editingQuestion.questionText.trim()) {
+                          triggerToast('Question text cannot be empty.');
+                          return;
+                        }
+                        const cleanedQuestion: Question = {
+                          ...editingQuestion,
+                          questionText: editingQuestion.questionText.trim(),
                           options: [
-                            qOptA.trim(),
-                            qOptB.trim(),
-                            qOptC.trim() || 'None of the above',
-                            qOptD.trim() || 'All of the above',
+                            editingQuestion.options[0].trim() || 'Option A',
+                            editingQuestion.options[1].trim() || 'Option B',
+                            editingQuestion.options[2].trim() || 'Option C',
+                            editingQuestion.options[3].trim() || 'Option D',
                           ],
-                          correctAnswer: qCorrect,
-                        });
-                        setQText('');
-                        setQOptA('');
-                        setQOptB('');
-                        setQOptC('');
-                        setQOptD('');
+                        };
+                        if (onUpdateQuestion) {
+                          onUpdateQuestion(cleanedQuestion);
+                        } else {
+                          onDeleteQuestion(cleanedQuestion.id);
+                          onAddQuestion(cleanedQuestion);
+                        }
+                        setEditingQuestion(null);
+                        triggerToast('Question updated successfully!');
                       }}
-                      className="w-full py-2.5 px-4 rounded-xl bg-[#0a6b3c] hover:bg-[#0e8a4e] text-white text-xs font-extrabold uppercase tracking-wider cursor-pointer"
+                      className="px-5 py-2 rounded-xl bg-[#0a6b3c] hover:bg-[#0e8a4e] text-white text-xs font-extrabold inline-flex items-center gap-1.5 cursor-pointer"
                     >
-                      + Save Question to Bank
+                      <Check className="w-4 h-4" />
+                      <span>Save Question Changes</span>
                     </button>
                   </div>
+                </div>
+              </div>
+            )}
 
-                  <div className="lg:col-span-7 p-6 rounded-2xl border border-neutral-200 bg-white text-black space-y-4">
-                    <div className="flex items-center justify-between">
-                      <h2 className="text-base font-extrabold text-black">
-                        {qSubject} Questions (
-                        {questions.filter((q) => q.subject === qSubject).length})
-                      </h2>
+            {/* Edit Question Bank Title/Description Modal */}
+            {editingBankItem && (
+              <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4">
+                <div className="w-full max-w-md bg-white text-black rounded-2xl border-2 border-[#0a6b3c] p-6 space-y-4 shadow-xl">
+                  <h3 className="text-base font-extrabold text-[#0a6b3c]">
+                    Edit Question Bank in {editingBankItem.subject}
+                  </h3>
+                  <div className="space-y-3">
+                    <div>
+                      <label className="block text-xs font-bold mb-1">Bank Title</label>
+                      <input
+                        type="text"
+                        value={editingBankItem.title}
+                        onChange={(e) =>
+                          setEditingBankItem({
+                            ...editingBankItem,
+                            title: e.target.value,
+                          })
+                        }
+                        className="w-full px-3.5 py-2.5 rounded-xl border border-neutral-300 text-xs font-bold text-black"
+                      />
                     </div>
-                    <div className="space-y-3 max-h-[600px] overflow-y-auto pr-1">
-                      {questions
-                        .filter((q) => q.subject === qSubject)
-                        .map((q, i) => (
-                          <div
-                            key={q.id}
-                            className="p-4 rounded-xl border border-neutral-200 bg-neutral-50 space-y-2"
-                          >
-                            <div className="flex items-center justify-between">
-                              <div className="flex items-center gap-2">
-                                <span className="px-2 py-0.5 rounded bg-[#0a6b3c] text-white font-mono text-[10px] font-bold">
-                                  #{i + 1} • {q.subject}
-                                </span>
-                                <span className="text-[11px] font-bold text-[#0a6b3c]">
-                                  Category: {q.category}
-                                </span>
-                              </div>
-                              <button
-                                type="button"
-                                onClick={() => onDeleteQuestion(q.id)}
-                                className="text-red-600 hover:text-red-800 p-1 cursor-pointer"
-                              >
-                                <Trash2 className="w-3.5 h-3.5" />
-                              </button>
-                            </div>
-                            <p className="text-xs font-bold text-black">{q.questionText}</p>
-                            <div className="grid grid-cols-2 gap-1.5 text-[11px]">
-                              {q.options.map((opt, oIdx) => (
-                                <div
-                                  key={oIdx}
-                                  className={`px-2.5 py-1 rounded ${
-                                    q.correctAnswer === oIdx
-                                      ? 'bg-[#0a6b3c] text-white font-bold'
-                                      : 'bg-white text-neutral-700 border border-neutral-200'
-                                  }`}
-                                >
-                                  {['A', 'B', 'C', 'D'][oIdx]}. {opt}
-                                </div>
-                              ))}
-                            </div>
-                          </div>
-                        ))}
+                    <div>
+                      <label className="block text-xs font-bold mb-1">Description</label>
+                      <input
+                        type="text"
+                        value={editingBankItem.description}
+                        onChange={(e) =>
+                          setEditingBankItem({
+                            ...editingBankItem,
+                            description: e.target.value,
+                          })
+                        }
+                        className="w-full px-3.5 py-2.5 rounded-xl border border-neutral-300 text-xs text-black"
+                      />
                     </div>
+                  </div>
+                  <div className="flex justify-end gap-2">
+                    <button
+                      type="button"
+                      onClick={() => setEditingBankItem(null)}
+                      className="px-4 py-2 rounded-lg border border-neutral-300 text-xs font-bold cursor-pointer"
+                    >
+                      Cancel
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        if (!editingBankItem.title.trim()) return;
+                        const nextBanks = questionBanks.map((b) =>
+                          b.id === editingBankItem.id
+                            ? {
+                                ...editingBankItem,
+                                title: editingBankItem.title.trim(),
+                                description:
+                                  editingBankItem.description.trim() ||
+                                  `Question bank for ${editingBankItem.subject}`,
+                              }
+                            : b
+                        );
+                        syncQuestionBanksToSettings(nextBanks);
+                        setEditingBankItem(null);
+                        triggerToast(`Updated question bank "${editingBankItem.title.trim()}".`);
+                      }}
+                      className="px-4 py-2 rounded-lg bg-[#0a6b3c] text-white text-xs font-bold cursor-pointer"
+                    >
+                      Save Bank
+                    </button>
                   </div>
                 </div>
               </div>
@@ -4042,10 +5430,16 @@ SET value = EXCLUDED.value,
                       onClick={() => {
                         const clean = newSubjectName.trim();
                         if (!clean) return;
-                        if (!subjectsList.includes(clean)) {
-                          setSubjectsList((prev) => [...prev, clean]);
-                        }
+                        const nextSubjs = subjectsList.includes(clean)
+                          ? subjectsList
+                          : [...subjectsList, clean];
+                        setSubjectsList(nextSubjs);
+                        onUpdateSettings({
+                          ...settings,
+                          availableSubjects: nextSubjs,
+                        });
                         setQSubject(clean);
+                        setOpenedBankId(null);
                         setNewSubjectName('');
                         setShowAddSubjectModal(false);
                       }}
@@ -4063,7 +5457,7 @@ SET value = EXCLUDED.value,
               <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4">
                 <div className="w-full max-w-md bg-white text-black rounded-2xl border-2 border-[#0a6b3c] p-6 space-y-4 shadow-xl">
                   <h3 className="text-base font-extrabold text-[#0a6b3c]">
-                    Add Question Bank in {qSubject}
+                    Create Question Bank in {qSubject}
                   </h3>
                   <div className="space-y-3">
                     <div>
@@ -4099,23 +5493,28 @@ SET value = EXCLUDED.value,
                       type="button"
                       onClick={() => {
                         if (!newBankTitle.trim()) return;
-                        setQuestionBanks((prev) => [
-                          ...prev,
-                          {
-                            id: `bank-${Date.now()}`,
-                            subject: qSubject,
-                            title: newBankTitle.trim(),
-                            description:
-                              newBankDesc.trim() || `Question bank for ${qSubject}`,
-                          },
-                        ]);
+                        const newBank: QuestionBankItem = {
+                          id: `bank-${Date.now()}`,
+                          subject: qSubject,
+                          title: newBankTitle.trim(),
+                          description:
+                            newBankDesc.trim() || `Question bank for ${qSubject}`,
+                        };
+                        const nextBanks = [...questionBanks, newBank];
+                        syncQuestionBanksToSettings(nextBanks);
+                        setOpenedBankId(newBank.id);
+                        setSelectedQuestionIds([]);
+                        setPreviewedBulkQuestions([]);
                         setNewBankTitle('');
                         setNewBankDesc('');
                         setShowAddBankModal(false);
+                        triggerToast(
+                          `Created question bank "${newBank.title}" in ${qSubject}! You can now upload bulk questions.`
+                        );
                       }}
                       className="px-4 py-2 rounded-lg bg-[#0a6b3c] text-white text-xs font-bold cursor-pointer"
                     >
-                      Create Bank
+                      Create &amp; Open Bank
                     </button>
                   </div>
                 </div>

@@ -71,12 +71,20 @@ export interface Candidate {
   createdAt: string;
 }
 
+export interface QuestionBankItem {
+  id: string;
+  subject: string;
+  title: string;
+  description: string;
+}
+
 export interface Question {
   id: string;
   subject: string;
   bankId?: string;
   category: CategoryType | 'All';
   questionText: string;
+  imageUrl?: string;
   options: [string, string, string, string];
   correctAnswer: number; // 0, 1, 2, or 3
 }
@@ -85,6 +93,7 @@ export interface AttemptedQuestionItem {
   subject: string;
   questionNumber: number;
   questionText: string;
+  imageUrl?: string;
   options: [string, string, string, string];
   selectedAnswer: number | null;
   correctAnswer: number;
@@ -233,6 +242,7 @@ export interface ExamSettings {
   subjectCombinations?: SubjectCombinationConfig[];
   examCenters?: ExamCenter[];
   availableSubjects?: string[];
+  questionBanks?: QuestionBankItem[];
   subjectPooling: SubjectPoolConfig[];
   publishedTests: PublishedTest[];
   psychometric: PsychometricConfig;

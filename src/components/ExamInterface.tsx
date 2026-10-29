@@ -923,6 +923,7 @@ export const ExamInterface: React.FC<ExamInterfaceProps> = ({
           subject: subj,
           questionNumber: idx + 1,
           questionText: q.questionText,
+          imageUrl: q.imageUrl,
           options: q.options,
           selectedAnswer: selected,
           correctAnswer: q.correctAnswer,
@@ -1870,6 +1871,16 @@ export const ExamInterface: React.FC<ExamInterfaceProps> = ({
                   {currentQuestion?.questionText}
                 </span>
               </div>
+
+              {currentQuestion?.imageUrl && (
+                <div className="rounded-xl border border-neutral-200 bg-neutral-50 p-3 flex items-center justify-center overflow-hidden">
+                  <img
+                    src={currentQuestion.imageUrl}
+                    alt={`Question ${subjQuestionIndex + 1} diagram`}
+                    className="max-h-72 w-auto object-contain rounded-lg"
+                  />
+                </div>
+              )}
 
               <div className="space-y-3">
                 {currentQuestion?.options.map((opt, idx) => {

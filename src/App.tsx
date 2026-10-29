@@ -245,7 +245,7 @@ export default function App() {
           }))
         );
       }
-      if (Array.isArray(remoteState.questions) && remoteState.questions.length > 0) {
+      if (Array.isArray(remoteState.questions)) {
         setQuestions(remoteState.questions);
       }
       if (remoteState.settings && typeof remoteState.settings === 'object') {
@@ -943,8 +943,19 @@ export default function App() {
         }}
         onClearAllCandidates={() => setCandidates([])}
         onAddQuestion={(q) => setQuestions((prev) => [q, ...prev])}
+        onAddQuestionsBulk={(newQs) =>
+          setQuestions((prev) => [...newQs, ...prev])
+        }
+        onUpdateQuestion={(updatedQ) =>
+          setQuestions((prev) =>
+            prev.map((q) => (q.id === updatedQ.id ? updatedQ : q))
+          )
+        }
         onDeleteQuestion={(id) =>
           setQuestions((prev) => prev.filter((q) => q.id !== id))
+        }
+        onDeleteQuestionsBulk={(ids) =>
+          setQuestions((prev) => prev.filter((q) => !ids.includes(q.id)))
         }
         onUpdateResult={(updatedResult) =>
           setResults((prev) =>

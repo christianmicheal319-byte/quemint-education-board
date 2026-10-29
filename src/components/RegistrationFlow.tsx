@@ -324,13 +324,36 @@ export const RegistrationFlow: React.FC<RegistrationFlowProps> = ({
       setFormError('Please enter both your First Name and Surname before proceeding.');
       return false;
     }
-    const activeSubjs =
+    if (!phone.trim()) {
+      setFormError('Please enter your Phone Number before proceeding.');
+      return false;
+    }
+    if (!password.trim() && !existingCandidate?.passwordHash) {
+      setFormError('Please create a Password for your candidate account before proceeding.');
+      return false;
+    }
+    if (!stateOfOrigin.trim()) {
+      setFormError('Please enter your State of Origin (Step A) before proceeding.');
+      return false;
+    }
+    if (!courseOfStudy.trim()) {
+      setFormError('Please enter your Course of Study (Step B) before proceeding.');
+      return false;
+    }
+    const finalCat = categoryConfirmedBadge ? category : categoryDraft;
+    let activeSubjs =
       confirmedSubjects.length > 0 ? confirmedSubjects : selectedSubjectsDraft;
     if (activeSubjs.length === 0) {
-      setFormError(
-        'Please select your subjects in Step C (Subject Combination) and click Confirm.'
+      const catCombo = subjectCombinations.find(
+        (sc) => sc.name.trim().toLowerCase() === finalCat.trim().toLowerCase()
       );
-      return false;
+      activeSubjs =
+        catCombo && catCombo.subjects.length > 0
+          ? catCombo.subjects
+          : ['English Language', 'Biology', 'Chemistry', 'Physics'];
+      setSelectedSubjectsDraft(activeSubjs);
+      setConfirmedSubjects(activeSubjs);
+      setSubjectConfirmedBadge(true);
     }
     if (requirePhotoCard && !passportDataUrl) {
       setFormError(
@@ -343,9 +366,20 @@ export const RegistrationFlow: React.FC<RegistrationFlowProps> = ({
   };
 
   const getCandidateExtraFields = (candId: string) => {
-    const finalSubjs =
-      confirmedSubjects.length > 0 ? confirmedSubjects : selectedSubjectsDraft;
     const finalCat = categoryConfirmedBadge ? category : categoryDraft;
+    const catCombo = subjectCombinations.find(
+      (sc) => sc.name.trim().toLowerCase() === finalCat.trim().toLowerCase()
+    );
+    const fallbackSubjs =
+      catCombo && catCombo.subjects.length > 0
+        ? catCombo.subjects
+        : ['English Language', 'Biology', 'Chemistry', 'Physics'];
+    const finalSubjs =
+      confirmedSubjects.length > 0
+        ? confirmedSubjects
+        : selectedSubjectsDraft.length > 0
+        ? selectedSubjectsDraft
+        : fallbackSubjs;
     const { examCenterId, examCenterName } = assignExamCenterAndIncrement(
       candId,
       selectedExamCenterId
@@ -909,12 +943,13 @@ export const RegistrationFlow: React.FC<RegistrationFlowProps> = ({
 
                 <div>
                   <label className="block text-xs font-bold uppercase tracking-wider text-neutral-700 mb-1.5">
-                    Phone Number
+                    Phone Number <span className="text-[#0a6b3c]">*</span>
                   </label>
                   <div className="relative">
                     <Phone className="w-4 h-4 text-neutral-400 absolute left-3 top-1/2 -translate-y-1/2" />
                     <input
                       type="tel"
+                      required
                       value={phone}
                       onChange={(e) => setPhone(e.target.value)}
                       placeholder="e.g. 08031234567"
@@ -925,12 +960,13 @@ export const RegistrationFlow: React.FC<RegistrationFlowProps> = ({
 
                 <div>
                   <label className="block text-xs font-bold uppercase tracking-wider text-neutral-700 mb-1.5">
-                    Password
+                    Password <span className="text-[#0a6b3c]">*</span>
                   </label>
                   <div className="relative">
                     <Lock className="w-4 h-4 text-neutral-400 absolute left-3 top-1/2 -translate-y-1/2" />
                     <input
                       type="password"
+                      required
                       value={password}
                       onChange={(e) => setPassword(e.target.value)}
                       placeholder="Create password"
@@ -975,10 +1011,11 @@ export const RegistrationFlow: React.FC<RegistrationFlowProps> = ({
               <div className="pt-3 border-t border-neutral-200 grid grid-cols-1 sm:grid-cols-2 gap-4">
                 <div>
                   <label className="block text-xs font-extrabold uppercase tracking-wider text-[#0a6b3c] mb-1.5">
-                    Step A • State of Origin
+                    Step A • State of Origin <span className="text-[#0a6b3c]">*</span>
                   </label>
                   <input
                     type="text"
+                    required
                     value={stateOfOrigin}
                     onChange={(e) => setStateOfOrigin(e.target.value)}
                     placeholder="e.g. Anambra, Lagos, Kano"
@@ -988,12 +1025,13 @@ export const RegistrationFlow: React.FC<RegistrationFlowProps> = ({
 
                 <div>
                   <label className="block text-xs font-extrabold uppercase tracking-wider text-[#0a6b3c] mb-1.5">
-                    Step B • Course of Study
+                    Step B • Course of Study <span className="text-[#0a6b3c]">*</span>
                   </label>
                   <div className="relative">
                     <GraduationCap className="w-4 h-4 text-[#0a6b3c] absolute left-3 top-1/2 -translate-y-1/2" />
                     <input
                       type="text"
+                      required
                       value={courseOfStudy}
                       onChange={(e) => setCourseOfStudy(e.target.value)}
                       placeholder="e.g. Medicine, Law, Computer Science"
@@ -1291,6 +1329,11 @@ export const RegistrationFlow: React.FC<RegistrationFlowProps> = ({
 
               {/* Save / Submit Registration Details for Admin Review */}
               <div className="pt-3 border-t border-neutral-100 space-y-2.5">
+                {formError && (
+                  <div className="p-3.5 rounded-xl bg-red-50 border border-red-200 text-red-800 text-xs font-extrabold">
+                    {formError}
+                  </div>
+                )}
                 {requirePhotoCard && !passportDataUrl && (
                   <div className="p-3 rounded-xl bg-amber-50 border border-amber-300 text-amber-900 text-xs font-bold flex items-center gap-2">
                     <Camera className="w-4 h-4 shrink-0 text-[#0a6b3c]" />

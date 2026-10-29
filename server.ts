@@ -327,7 +327,7 @@ async function startServer() {
       changed = true;
     }
 
-    if (Array.isArray(questions) && questions.length > 0) {
+    if (Array.isArray(questions)) {
       sharedAppState.questions = questions;
       changed = true;
     }
