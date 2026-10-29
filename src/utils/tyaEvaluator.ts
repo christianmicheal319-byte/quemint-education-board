@@ -6,8 +6,39 @@ import {
   ExamResult,
   ExamSettings,
   Question,
+  QuestionType,
 } from '../types';
 import { drawOfficialSeal } from './pdfSlipGenerator';
+
+export const SAMPLE_MCQ_BULK_TEXT = `1. Crossing over in meiosis occurs where
+A. Prophase I ✅
+B. Anaphase
+C. Metaphase
+D. Prophase II
+
+2. Which organelle is known as the powerhouse of the cell?
+A. Nucleus
+B. Mitochondria ✅
+C. Ribosome
+D. Golgi apparatus
+
+3. What is the functional unit of the mammalian kidney?
+A. Alveolus
+B. Neuron
+C. Nephron ✅
+D. Villus
+
+4. Which plant hormone is primarily responsible for apical dominance and phototropism?
+A. Auxin ✅
+B. Gibberellin
+C. Cytokinin
+D. Abscisic acid
+
+5. Which blood vessel carries oxygenated blood from the lungs to the heart?
+A. Pulmonary artery
+B. Vena cava
+C. Aorta
+D. Pulmonary vein ✅`;
 
 export const SAMPLE_20_BIOLOGY_TYA_6COL_TEXT = `1 | TYA | Which part of the nephron is mainly responsible for ultrafiltration of blood? | Glomerulus | 1 | YES
 2 | TYA | In which stage of mitosis do chromosomes align at the equator of the cell? | Metaphase | 1 | YES
@@ -104,16 +135,25 @@ export function evaluateTyaExactMatch(
 
 export interface TyaEvaluationBatchRequestItem {
   id: string;
-  question: string;
-  answer_keys: string[];
-  candidate_answer: string;
+  question?: string;
+  questionText?: string;
+  answer_keys?: string[];
+  answerKeys?: string[];
+  candidate_answer?: string;
+  typedAnswer?: string;
+  mark?: number;
+  allowAiEval?: boolean;
 }
 
 export interface TyaEvaluationResponseItem {
   id?: string;
   is_correct: boolean;
+  isCorrect?: boolean;
   confidence: number;
+  aiConfidence?: number;
   explanation: string;
+  aiExplanation?: string;
+  aiEvaluated?: boolean;
   correct_answer: string;
 }
 
@@ -121,23 +161,45 @@ export interface TyaEvaluationResponseItem {
  * Step 2: AI Evaluation via backend /api/evaluate-tya
  */
 export async function evaluateTyaBatchWithServer(
-  items: TyaEvaluationBatchRequestItem[]
+  items: TyaEvaluationBatchRequestItem[],
+  enableAiEval = true
 ): Promise<Record<string, TyaEvaluationResponseItem>> {
   if (!items || items.length === 0) return {};
+
+  const normalizedItems = items.map((item) => ({
+    id: item.id,
+    question: item.question || item.questionText || '',
+    answer_keys: item.answer_keys || item.answerKeys || [],
+    candidate_answer: item.candidate_answer ?? item.typedAnswer ?? '',
+    allowAiEval: item.allowAiEval !== false && enableAiEval,
+  }));
 
   try {
     const res = await fetch('/api/evaluate-tya', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ items }),
+      body: JSON.stringify({ items: normalizedItems, enableAiEval }),
     });
     if (res.ok) {
       const data = await res.json();
       if (data && Array.isArray(data.results)) {
         const map: Record<string, TyaEvaluationResponseItem> = {};
-        data.results.forEach((r: TyaEvaluationResponseItem) => {
+        data.results.forEach((r: any) => {
           if (r && r.id) {
-            map[r.id] = r;
+            const isCorr = Boolean(r.is_correct ?? r.isCorrect);
+            const expl = r.explanation || r.aiExplanation || '';
+            const conf = typeof r.confidence === 'number' ? r.confidence : 0.9;
+            map[r.id] = {
+              id: r.id,
+              is_correct: isCorr,
+              isCorrect: isCorr,
+              confidence: conf,
+              aiConfidence: conf,
+              explanation: expl,
+              aiExplanation: expl,
+              aiEvaluated: Boolean(r.aiEvaluated ?? true),
+              correct_answer: r.correct_answer || '',
+            };
           }
         });
         return map;
@@ -149,16 +211,21 @@ export async function evaluateTyaBatchWithServer(
 
   // Client fallback if offline
   const fallbackMap: Record<string, TyaEvaluationResponseItem> = {};
-  items.forEach((item) => {
+  normalizedItems.forEach((item) => {
     const exact = evaluateTyaExactMatch(item.candidate_answer, item.answer_keys);
     const official = item.answer_keys.join(' | ');
+    const expl = exact.matched
+      ? exact.explanation
+      : `Candidate answered "${item.candidate_answer || 'None'}". Official answer key: ${official}.`;
     fallbackMap[item.id] = {
       id: item.id,
       is_correct: exact.matched,
+      isCorrect: exact.matched,
       confidence: exact.matched ? 1 : 0.85,
-      explanation: exact.matched
-        ? exact.explanation
-        : `Candidate answered "${item.candidate_answer || 'None'}". Official answer key: ${official}.`,
+      aiConfidence: exact.matched ? 1 : 0.85,
+      explanation: expl,
+      aiExplanation: expl,
+      aiEvaluated: false,
       correct_answer: official,
     };
   });
@@ -166,44 +233,81 @@ export async function evaluateTyaBatchWithServer(
 }
 
 /**
+/**
+ * Helper to detect checkmark/correct marker on an option (e.g. "Prophase I ✅", "Prophase I ✓", "Prophase I (correct)")
+ * and return cleaned option text + boolean flag.
+ */
+function extractOptionTextAndCorrectness(rawOpt: string): {
+  cleanText: string;
+  isCorrect: boolean;
+} {
+  const raw = (rawOpt || '').trim();
+  const hasCheckmark =
+    /[✅✓✔☑]/.test(raw) ||
+    /\(\s*correct\s*\)|\[\s*correct\s*\]/i.test(raw) ||
+    /<--+/.test(raw) ||
+    /\s+\*+$/.test(raw);
+
+  const cleanText = raw
+    .replace(/[✅✓✔☑]/g, '')
+    .replace(/\(\s*correct\s*\)|\[\s*correct\s*\]/gi, '')
+    .replace(/<--+/g, '')
+    .replace(/\s+\*+$/, '')
+    .trim();
+
+  return {
+    cleanText: cleanText || raw,
+    isCorrect: hasCheckmark,
+  };
+}
+
+/**
  * Parse inline options like "(A) Opt1 (B) Opt2 (C) Opt3 (D) Opt4" or "A. Opt1 B. Opt2 C. Opt3 D. Opt4"
  */
-function parseInlineMcqOptions(rawOptions: string): [string, string, string, string] {
+function parseInlineMcqOptionsWithCorrect(rawOptions: string): {
+  options: [string, string, string, string];
+  detectedCorrectIndex: number | null;
+} {
   const text = (rawOptions || '').trim();
+  let rawList: string[] = [];
+
   const regexParens =
     /\(A\)\s*(.*?)\s*\(B\)\s*(.*?)\s*\(C\)\s*(.*?)\s*\(D\)\s*(.*?)(?:\s*\([EF]\).*)?$/i;
   const matchParens = text.match(regexParens);
   if (matchParens) {
-    return [
-      matchParens[1].trim(),
-      matchParens[2].trim(),
-      matchParens[3].trim(),
-      matchParens[4].trim(),
-    ];
+    rawList = [matchParens[1], matchParens[2], matchParens[3], matchParens[4]];
+  } else {
+    const regexDots =
+      /\bA[.)]\s*(.*?)\s+\bB[.)]\s*(.*?)\s+\bC[.)]\s*(.*?)\s+\bD[.)]\s*(.*?)(?:\s+\b[EF][.)].*)?$/i;
+    const matchDots = text.match(regexDots);
+    if (matchDots) {
+      rawList = [matchDots[1], matchDots[2], matchDots[3], matchDots[4]];
+    } else {
+      rawList = text
+        .split(/[;,]/)
+        .map((p) => p.replace(/^\(?[A-F][).]\s*/i, '').trim())
+        .filter(Boolean);
+    }
   }
 
-  const regexDots =
-    /\bA[.)]\s*(.*?)\s+\bB[.)]\s*(.*?)\s+\bC[.)]\s*(.*?)\s+\bD[.)]\s*(.*?)(?:\s+\b[EF][.)].*)?$/i;
-  const matchDots = text.match(regexDots);
-  if (matchDots) {
-    return [
-      matchDots[1].trim(),
-      matchDots[2].trim(),
-      matchDots[3].trim(),
-      matchDots[4].trim(),
-    ];
-  }
+  let detectedCorrectIndex: number | null = null;
+  const cleanedOptions = [0, 1, 2, 3].map((idx) => {
+    const item = rawList[idx] || `Option ${String.fromCharCode(65 + idx)}`;
+    const { cleanText, isCorrect } = extractOptionTextAndCorrectness(item);
+    if (isCorrect && detectedCorrectIndex === null) {
+      detectedCorrectIndex = idx;
+    }
+    return cleanText;
+  }) as [string, string, string, string];
 
-  const parts = text
-    .split(/[;,]/)
-    .map((p) => p.replace(/^\(?[A-F][).]\s*/i, '').trim())
-    .filter(Boolean);
-  return [
-    parts[0] || 'Option A',
-    parts[1] || 'Option B',
-    parts[2] || 'Option C',
-    parts[3] || 'Option D',
-  ];
+  return {
+    options: cleanedOptions,
+    detectedCorrectIndex,
+  };
+}
+
+function parseInlineMcqOptions(rawOptions: string): [string, string, string, string] {
+  return parseInlineMcqOptionsWithCorrect(rawOptions).options;
 }
 
 function letterToOptionIndex(rawLetter: string): number {
@@ -218,12 +322,166 @@ function letterToOptionIndex(rawLetter: string): number {
 }
 
 /**
+ * Parse multi-line MCQ questions where each question has A/B/C/D option lines
+ * and the correct option is marked with ✅ (or ✓, ✔, *, (correct)) or an "Answer: A" line.
+ * Example:
+ * 1. Crossing over in meiosis occurs where
+ * A. Prophase I ✅
+ * B. Anaphase
+ * C. Metaphase
+ * D. Prophase II
+ */
+function parseMultilineMcqBlocks(
+  rawText: string,
+  subject: string,
+  category: CategoryType | 'All' = 'All',
+  bankId?: string
+): Question[] {
+  const lines = (rawText || '')
+    .split(/\r?\n/)
+    .map((l) => l.trim());
+
+  const results: Question[] = [];
+  let currentQuestionLines: string[] = [];
+  let currentOptions: { letter: string; text: string; isCorrect: boolean }[] = [];
+  let explicitAnswerLetter: string | null = null;
+  let currentMark = 1;
+
+  const flushCurrentMcq = (idxSeed: number) => {
+    const questionText = currentQuestionLines
+      .join(' ')
+      .replace(/^(?:Q(?:uestion)?\s*)?\d+[.):-]\s*/i, '')
+      .trim();
+
+    if (questionText && currentOptions.length >= 2) {
+      const optMap: Record<string, { text: string; isCorrect: boolean }> = {};
+      currentOptions.forEach((o) => {
+        optMap[o.letter.toUpperCase()] = { text: o.text, isCorrect: o.isCorrect };
+      });
+
+      const letters = ['A', 'B', 'C', 'D'];
+      const finalOptions = letters.map((letter, idx) => {
+        if (optMap[letter]) return optMap[letter].text;
+        if (currentOptions[idx]) return currentOptions[idx].text;
+        return `Option ${letter}`;
+      }) as [string, string, string, string];
+
+      let correctIndex = 0;
+      const markedIdx = letters.findIndex((l) => optMap[l]?.isCorrect);
+      if (markedIdx !== -1) {
+        correctIndex = markedIdx;
+      } else {
+        const fallbackMarkedIdx = currentOptions.findIndex((o) => o.isCorrect);
+        if (fallbackMarkedIdx !== -1 && fallbackMarkedIdx < 4) {
+          correctIndex = fallbackMarkedIdx;
+        } else if (explicitAnswerLetter) {
+          correctIndex = letterToOptionIndex(explicitAnswerLetter);
+        }
+      }
+
+      results.push({
+        id: `q-mcq-${Date.now()}-${idxSeed}-${results.length}`,
+        subject,
+        bankId,
+        category,
+        questionType: 'MCQ',
+        questionText,
+        options: finalOptions,
+        correctAnswer: correctIndex,
+        mark: currentMark,
+        allowAiEval: false, // No AI evaluation needed for MCQ
+      });
+    }
+
+    currentQuestionLines = [];
+    currentOptions = [];
+    explicitAnswerLetter = null;
+    currentMark = 1;
+  };
+
+  lines.forEach((line, lineIdx) => {
+    if (!line) {
+      if (currentQuestionLines.length > 0 && currentOptions.length >= 2) {
+        flushCurrentMcq(lineIdx);
+      }
+      return;
+    }
+
+    // Check if line is an explicit answer key line like "Answer: A" or "Correct Answer: B"
+    const answerLineMatch = line.match(
+      /^(?:correct\s*answer|answer\s*key|answer|ans|key)\s*[:=-]\s*\(?([A-Da-d])\)?(?:\b|$)/i
+    );
+    if (answerLineMatch && currentQuestionLines.length > 0) {
+      explicitAnswerLetter = answerLineMatch[1].toUpperCase();
+      if (currentOptions.length >= 2) {
+        flushCurrentMcq(lineIdx);
+      }
+      return;
+    }
+
+    // Check if line is an option line: "A. Prophase I ✅", "(A) Prophase I", "A) Prophase I", "A - Prophase I"
+    const optionMatch = line.match(
+      /^(?:\(([A-Fa-f])\)|([A-Fa-f])[.):-]\s+)(.+)$/
+    );
+    if (optionMatch) {
+      const letter = (optionMatch[1] || optionMatch[2] || 'A').toUpperCase();
+      const rawOptBody = optionMatch[3].trim();
+
+      // If this is option 'A' and we already had >= 2 options for a previous question, flush first
+      if (letter === 'A' && currentOptions.length >= 2) {
+        flushCurrentMcq(lineIdx);
+      }
+
+      const { cleanText, isCorrect } = extractOptionTextAndCorrectness(rawOptBody);
+      currentOptions.push({
+        letter,
+        text: cleanText,
+        isCorrect,
+      });
+      return;
+    }
+
+    // Check if a single line contains inline options A. ... B. ... C. ... D. ...
+    if (/\bA[.)]\s+.+\bB[.)]\s+.+\bC[.)]\s+/i.test(line) || /\(A\)\s*.+\(B\)\s*.+\(C\)/i.test(line)) {
+      const { options, detectedCorrectIndex } = parseInlineMcqOptionsWithCorrect(line);
+      ['A', 'B', 'C', 'D'].forEach((letter, idx) => {
+        currentOptions.push({
+          letter,
+          text: options[idx],
+          isCorrect: detectedCorrectIndex === idx,
+        });
+      });
+      return;
+    }
+
+    // Otherwise it's a question line (either start of a new question or continuation of stem)
+    if (currentOptions.length >= 2) {
+      flushCurrentMcq(lineIdx);
+    }
+
+    currentQuestionLines.push(line);
+  });
+
+  if (currentQuestionLines.length > 0 && currentOptions.length >= 2) {
+    flushCurrentMcq(lines.length);
+  }
+
+  return results;
+}
+
+/**
  * Bulk Question Parser supporting:
- * 1. Format A (6-column MCQ):
- *    QNo | TYPE=MCQ (or MCQ) | Question | Options (A) Opt1 (B) Opt2 (C) Opt3 (D) Opt4 | Answer Key (e.g., C) | Mark (e.g., 1)
- * 2. Format B (6-column TYA):
- *    QNo | TYPE=TYA (or TYA) | Question | Answer Key(s) (can contain |) | Mark | AI Evaluation (YES/NO)
- * 3. Numbered list format:
+ * 1. Multi-line MCQ format (No |MCQ| needed, no AI evaluation needed):
+ *    1. Crossing over in meiosis occurs where
+ *    A. Prophase I ✅
+ *    B. Anaphase
+ *    C. Metaphase
+ *    D. Prophase II
+ * 2. Format A (Pipe MCQ — with or without |MCQ| column):
+ *    QNo | MCQ | Question | Options (A) Opt1 (B) Opt2 (C) Opt3 (D) Opt4 | Answer Key (e.g., C) | Mark (e.g., 1)
+ * 3. Format B (Pipe TYA — with or without |TYA| column):
+ *    QNo | TYA | Question | Answer Key(s) (can contain |) | Mark | AI Evaluation (YES/NO)
+ * 4. Numbered TYA list format:
  *    1. Which part of the nephron is mainly responsible for ultrafiltration of blood?
  *    Answer key: Glomerulus.
  */
@@ -231,7 +489,8 @@ export function parseBulkQuestionsInput(
   rawText: string,
   subject: string,
   category: CategoryType | 'All' = 'All',
-  bankId?: string
+  bankId?: string,
+  selectedFormat: QuestionType = 'MCQ'
 ): Question[] {
   const trimmed = (rawText || '').trim();
   if (!trimmed) return [];
@@ -242,6 +501,18 @@ export function parseBulkQuestionsInput(
     .map((l) => l.trim())
     .filter(Boolean);
 
+  // Check if input has multi-line MCQ option lines (A. ..., B. ..., C. ..., D. ...) without pipe delimiters
+  const hasOptionLines = lines.some(
+    (l) => !l.includes('|') && /^(?:\([A-Da-d]\)|[A-Da-d][.):-]\s+).+/.test(l)
+  );
+
+  if (hasOptionLines && (selectedFormat === 'MCQ' || !lines.some((l) => l.includes('|')))) {
+    const multilineMcq = parseMultilineMcqBlocks(trimmed, subject, category, bankId);
+    if (multilineMcq.length > 0) {
+      return multilineMcq;
+    }
+  }
+
   // Check if input uses pipe-delimited rows
   const hasPipeRows = lines.some((l) => l.includes('|'));
 
@@ -249,25 +520,36 @@ export function parseBulkQuestionsInput(
     lines.forEach((line, idx) => {
       if (!line.includes('|')) return;
       const rawCols = line.split('|').map((c) => c.trim());
-      if (rawCols.length < 3) return;
+      if (rawCols.length < 2) return;
 
       // Detect Column 2 TYPE (e.g. "TYA", "TYPE=TYA", "MCQ", "TYPE=MCQ")
-      const col1Upper = rawCols[1]
+      const col1Upper = (rawCols[1] || '')
         .toUpperCase()
         .replace(/^TYPE\s*=\s*/i, '')
         .trim();
 
-      if (col1Upper === 'TYA') {
-        // Format B - TYA:
-        // QNo | TYA | Question | Answer Key(s) [may span multiple pipes if keys separated by |] | Mark | AI Evaluation
-        const questionText = rawCols[2] || '';
+      const isExplicitTya = col1Upper === 'TYA';
+      const isExplicitMcq = col1Upper === 'MCQ';
+
+      if (isExplicitTya || (!isExplicitMcq && selectedFormat === 'TYA')) {
+        // Format B - TYA (Supports both with "| TYA |" and without "| TYA |"):
+        // With | TYA |: QNo | TYA | Question | Answer Key(s) | Mark | AI Evaluation
+        // Without | TYA |:
+        //   Case 1 (starts with QNo number): 1 | Question | Answer Key(s) | Mark | AI Evaluation
+        //   Case 2 (starts directly with Question): Question | Answer Key(s) | Mark | AI Evaluation
+        let questionColIdx = 2;
+        if (!isExplicitTya) {
+          const firstColIsNumber = /^\d+[.)]?$/.test(rawCols[0]);
+          questionColIdx = firstColIsNumber ? 1 : 0;
+        }
+
+        const questionText = (rawCols[questionColIdx] || '').replace(/^\d+[.)]\s*/, '').trim();
         if (!questionText) return;
 
-        // Because Answer Key(s) itself may contain '|' (e.g. Grana | Thylakoid membrane),
-        // we inspect the last two columns for Mark (number) and AI Evaluation (YES/NO/TRUE/FALSE)
         let allowAiEval = true;
         let mark = 1;
         let answerKeyEndIdx = rawCols.length;
+        const minColsForMeta = questionColIdx + 3;
 
         const lastCol = rawCols[rawCols.length - 1]
           .toUpperCase()
@@ -276,7 +558,7 @@ export function parseBulkQuestionsInput(
 
         if (
           ['YES', 'NO', 'TRUE', 'FALSE', 'Y', 'N', '1', '0'].includes(lastCol) &&
-          rawCols.length >= 5
+          rawCols.length >= minColsForMeta
         ) {
           allowAiEval = ['YES', 'TRUE', 'Y', '1'].includes(lastCol);
           answerKeyEndIdx = rawCols.length - 1;
@@ -285,7 +567,11 @@ export function parseBulkQuestionsInput(
             .replace(/^MARK\s*=\s*/i, '')
             .trim();
           const parsedMark = Number(secondLastCol);
-          if (!Number.isNaN(parsedMark) && parsedMark > 0 && rawCols.length >= 6) {
+          if (
+            !Number.isNaN(parsedMark) &&
+            parsedMark > 0 &&
+            rawCols.length >= minColsForMeta + 1
+          ) {
             mark = parsedMark;
             answerKeyEndIdx = rawCols.length - 2;
           }
@@ -293,13 +579,18 @@ export function parseBulkQuestionsInput(
           const parsedLastMark = Number(
             rawCols[rawCols.length - 1].replace(/^MARK\s*=\s*/i, '').trim()
           );
-          if (!Number.isNaN(parsedLastMark) && parsedLastMark > 0 && rawCols.length >= 5) {
+          if (
+            !Number.isNaN(parsedLastMark) &&
+            parsedLastMark > 0 &&
+            rawCols.length >= minColsForMeta
+          ) {
             mark = parsedLastMark;
             answerKeyEndIdx = rawCols.length - 1;
           }
         }
 
-        const answerKeySlice = rawCols.slice(3, answerKeyEndIdx).filter(Boolean);
+        const answerStartIdx = questionColIdx + 1;
+        const answerKeySlice = rawCols.slice(answerStartIdx, answerKeyEndIdx).filter(Boolean);
         const answerKeys: string[] = [];
         answerKeySlice.forEach((segment) => {
           parseAnswerKeys(segment).forEach((k) => {
@@ -309,9 +600,11 @@ export function parseBulkQuestionsInput(
           });
         });
 
-        if (answerKeys.length === 0 && rawCols[3]) {
-          answerKeys.push(rawCols[3].replace(/\.$/, '').trim());
+        if (answerKeys.length === 0 && rawCols[answerStartIdx]) {
+          answerKeys.push(rawCols[answerStartIdx].replace(/\.$/, '').trim());
         }
+
+        if (answerKeys.length === 0) return;
 
         parsedQuestions.push({
           id: `q-tya-${Date.now()}-${idx}`,
@@ -334,29 +627,49 @@ export function parseBulkQuestionsInput(
         return;
       }
 
-      if (col1Upper === 'MCQ') {
-        // Format A - MCQ:
+      if (isExplicitMcq) {
+        // Format A - MCQ with explicit | MCQ | column:
         // Case 1 (6 columns): QNo | MCQ | Question | (A) Opt1 (B) Opt2 (C) Opt3 (D) Opt4 | Answer Key | Mark
-        // Case 2 (9 columns): QNo | MCQ | Question | OptA | OptB | OptC | OptD | Answer Key | Mark
+        // Case 2 (8-9 columns): QNo | MCQ | Question | OptA | OptB | OptC | OptD | Answer Key | Mark
         const questionText = rawCols[2] || '';
         if (!questionText) return;
 
-        let options: [string, string, string, string] = ['Option A', 'Option B', 'Option C', 'Option D'];
+        let options: [string, string, string, string] = [
+          'Option A',
+          'Option B',
+          'Option C',
+          'Option D',
+        ];
         let correctAnswer = 0;
         let mark = 1;
 
-        if (rawCols.length >= 8) {
-          options = [
-            rawCols[3] || 'Option A',
-            rawCols[4] || 'Option B',
-            rawCols[5] || 'Option C',
-            rawCols[6] || 'Option D',
-          ];
-          correctAnswer = letterToOptionIndex(rawCols[7]);
+        if (rawCols.length >= 7 && !/\([A-D]\)|\bA[.)]/i.test(rawCols[3] || '')) {
+          let detectedFromCheckmark: number | null = null;
+          const extracted = [rawCols[3], rawCols[4], rawCols[5], rawCols[6]].map(
+            (optStr, oIdx) => {
+              const { cleanText, isCorrect } = extractOptionTextAndCorrectness(
+                optStr || `Option ${String.fromCharCode(65 + oIdx)}`
+              );
+              if (isCorrect && detectedFromCheckmark === null) {
+                detectedFromCheckmark = oIdx;
+              }
+              return cleanText;
+            }
+          ) as [string, string, string, string];
+          options = extracted;
+          correctAnswer =
+            detectedFromCheckmark !== null
+              ? detectedFromCheckmark
+              : letterToOptionIndex(rawCols[7] || 'A');
           mark = Number(rawCols[8]) || 1;
         } else {
-          options = parseInlineMcqOptions(rawCols[3] || '');
-          correctAnswer = letterToOptionIndex(rawCols[4] || 'A');
+          const { options: parsedOpts, detectedCorrectIndex } =
+            parseInlineMcqOptionsWithCorrect(rawCols[3] || '');
+          options = parsedOpts;
+          correctAnswer =
+            detectedCorrectIndex !== null
+              ? detectedCorrectIndex
+              : letterToOptionIndex(rawCols[4] || 'A');
           mark = Number(rawCols[5]) || 1;
         }
 
@@ -370,21 +683,31 @@ export function parseBulkQuestionsInput(
           options,
           correctAnswer,
           mark,
+          allowAiEval: false,
         });
         return;
       }
 
-      // Fallback: Legacy pipe format without explicit MCQ/TYA in column 2:
-      // e.g., Question | OptA | OptB | OptC | OptD | AnswerKey
-      if (rawCols.length >= 6) {
-        const questionText = rawCols[0];
-        const options: [string, string, string, string] = [
-          rawCols[1] || 'Option A',
-          rawCols[2] || 'Option B',
-          rawCols[3] || 'Option C',
-          rawCols[4] || 'Option D',
-        ];
-        const correctAnswer = letterToOptionIndex(rawCols[5] || 'A');
+      // Pipe MCQ format WITHOUT typing | MCQ |:
+      // Supports:
+      // 1) QNo | Question | (A) Opt1 (B) Opt2 (C) Opt3 (D) Opt4 | AnswerKey | Mark
+      // 2) Question | (A) Opt1 (B) Opt2 (C) Opt3 (D) Opt4 | AnswerKey | Mark
+      // 3) QNo | Question | OptA | OptB | OptC | OptD | [AnswerKey] | [Mark] (also supports ✅ on any option)
+      // 4) Question | OptA | OptB | OptC | OptD | [AnswerKey] | [Mark]
+      const firstIsQNo = /^\d+[.)]?$/.test(rawCols[0]);
+      const qColIdx = firstIsQNo ? 1 : 0;
+      const questionText = (rawCols[qColIdx] || '').replace(/^\d+[.)]\s*/, '').trim();
+      if (!questionText) return;
+
+      const nextCol = rawCols[qColIdx + 1] || '';
+      const isInlineOptions =
+        /\([A-D]\)/i.test(nextCol) || /\bA[.)]\s+.+\bB[.)]/i.test(nextCol);
+
+      if (isInlineOptions) {
+        const { options, detectedCorrectIndex } =
+          parseInlineMcqOptionsWithCorrect(nextCol);
+        const ansCol = rawCols[qColIdx + 2] || 'A';
+        const markCol = rawCols[qColIdx + 3];
         parsedQuestions.push({
           id: `q-mcq-${Date.now()}-${idx}`,
           subject,
@@ -393,8 +716,40 @@ export function parseBulkQuestionsInput(
           questionType: 'MCQ',
           questionText,
           options,
-          correctAnswer,
-          mark: Number(rawCols[6]) || 1,
+          correctAnswer:
+            detectedCorrectIndex !== null
+              ? detectedCorrectIndex
+              : letterToOptionIndex(ansCol),
+          mark: Number(markCol) || 1,
+          allowAiEval: false,
+        });
+      } else if (rawCols.length >= qColIdx + 5) {
+        let detectedFromCheckmark: number | null = null;
+        const options = [0, 1, 2, 3].map((oIdx) => {
+          const rawOpt = rawCols[qColIdx + 1 + oIdx] || `Option ${String.fromCharCode(65 + oIdx)}`;
+          const { cleanText, isCorrect } = extractOptionTextAndCorrectness(rawOpt);
+          if (isCorrect && detectedFromCheckmark === null) {
+            detectedFromCheckmark = oIdx;
+          }
+          return cleanText;
+        }) as [string, string, string, string];
+
+        const ansCol = rawCols[qColIdx + 5] || 'A';
+        const markCol = rawCols[qColIdx + 6];
+        parsedQuestions.push({
+          id: `q-mcq-${Date.now()}-${idx}`,
+          subject,
+          bankId,
+          category,
+          questionType: 'MCQ',
+          questionText,
+          options,
+          correctAnswer:
+            detectedFromCheckmark !== null
+              ? detectedFromCheckmark
+              : letterToOptionIndex(ansCol),
+          mark: Number(markCol) || 1,
+          allowAiEval: false,
         });
       }
     });
@@ -404,12 +759,18 @@ export function parseBulkQuestionsInput(
     }
   }
 
+  // Fallback for multi-line MCQ blocks if not already matched
+  const multilineMcqFallback = parseMultilineMcqBlocks(trimmed, subject, category, bankId);
+  if (multilineMcqFallback.length > 0) {
+    return multilineMcqFallback;
+  }
+
   // Also support numbered TYA blocks like:
   // "1. Which part of the nephron is mainly responsible for ultrafiltration of blood?
   // Answer key: Glomerulus."
   let currentQuestionText = '';
   lines.forEach((line, idx) => {
-    const answerMatch = line.match(/^answer\s*key\s*[:=-]\s*(.+)$/i);
+    const answerMatch = line.match(/^(?:answer\s*key|answer|ans)\s*[:=-]\s*(.+)$/i);
     if (answerMatch && currentQuestionText) {
       const rawKeyStr = answerMatch[1].trim().replace(/\.$/, '').trim();
       const answerKeys = parseAnswerKeys(rawKeyStr);

@@ -266,12 +266,22 @@ export default function App() {
 
       skipNextServerPushRef.current = true;
       if (Array.isArray(remoteState.candidates) && remoteState.candidates.length > 0) {
-        setCandidates(
-          remoteState.candidates.map((c: Candidate) => ({
+        setCandidates((prev) => {
+          const remoteNormalized: Candidate[] = remoteState.candidates.map((c: Candidate) => ({
             ...c,
+            category: normalizeCategoryName(c.category),
             passportDataUrl: getCandidateHdPortraitUrl(c),
-          }))
-        );
+          }));
+          const remoteIds = new Set(remoteNormalized.map((c) => c.id));
+          const localOnly = prev.filter((c) => c && c.id && !remoteIds.has(c.id));
+          const merged = localOnly.length > 0 ? [...localOnly, ...remoteNormalized] : remoteNormalized;
+          try {
+            localStorage.setItem('quemint_candidates_v4', JSON.stringify(merged));
+          } catch {
+            // ignore
+          }
+          return merged;
+        });
       }
       if (Array.isArray(remoteState.questions) && remoteState.questions.length > 0) {
         setQuestions(remoteState.questions);
@@ -559,42 +569,72 @@ export default function App() {
     eventTitle?: string,
     eventMsg?: string
   ) => {
+    const normalizedCand: Candidate = {
+      ...cand,
+      category: normalizeCategoryName(cand.category),
+      passportDataUrl: getCandidateHdPortraitUrl(cand),
+    };
+    localMutationLockUntilRef.current = Date.now() + 6000;
+    skipNextServerPushRef.current = false;
+
     setCandidates((prev) => {
-      const exists = prev.some((c) => c.id === cand.id);
-      if (exists) {
-        return prev.map((c) => (c.id === cand.id ? cand : c));
+      const exists = prev.some((c) => c.id === normalizedCand.id);
+      const nextList = exists
+        ? prev.map((c) => (c.id === normalizedCand.id ? normalizedCand : c))
+        : [normalizedCand, ...prev];
+      try {
+        localStorage.setItem('quemint_candidates_v4', JSON.stringify(nextList));
+      } catch {
+        // ignore quota errors
       }
-      return [cand, ...prev];
+      fetch('/api/candidates/register', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ candidate: normalizedCand }),
+      })
+        .then((r) => r.json())
+        .then((d) => {
+          if (d?.state?.updatedAt) {
+            lastAppliedServerTimestampRef.current = Math.max(
+              lastAppliedServerTimestampRef.current,
+              d.state.updatedAt
+            );
+          }
+        })
+        .catch(() => {});
+      return nextList;
     });
     setResults((prev) => {
       const hasMatch = prev.some(
         (r) =>
-          r.candidateId === cand.id ||
-          (cand.regNumber &&
-            r.regNumber.trim().toUpperCase() === cand.regNumber.trim().toUpperCase())
+          r.candidateId === normalizedCand.id ||
+          (normalizedCand.regNumber &&
+            r.regNumber.trim().toUpperCase() ===
+              normalizedCand.regNumber.trim().toUpperCase())
       );
       if (!hasMatch) return prev;
       return prev.map((r) =>
-        r.candidateId === cand.id ||
-        (cand.regNumber &&
-          r.regNumber.trim().toUpperCase() === cand.regNumber.trim().toUpperCase())
+        r.candidateId === normalizedCand.id ||
+        (normalizedCand.regNumber &&
+          r.regNumber.trim().toUpperCase() ===
+            normalizedCand.regNumber.trim().toUpperCase())
           ? {
               ...r,
-              category: cand.category,
-              gender: cand.gender,
-              courseOfStudy: cand.courseOfStudy || r.courseOfStudy,
-              stateOfOrigin: cand.stateOfOrigin || r.stateOfOrigin,
-              examCenterName: cand.examCenterName || r.examCenterName,
-              regNumber: cand.regNumber || r.regNumber,
-              candidateName: `${cand.firstName} ${
-                cand.middleName ? cand.middleName + ' ' : ''
-              }${cand.surname}`.trim(),
+              category: normalizedCand.category,
+              gender: normalizedCand.gender,
+              courseOfStudy: normalizedCand.courseOfStudy || r.courseOfStudy,
+              stateOfOrigin: normalizedCand.stateOfOrigin || r.stateOfOrigin,
+              examCenterName: normalizedCand.examCenterName || r.examCenterName,
+              regNumber: normalizedCand.regNumber || r.regNumber,
+              candidateName: `${normalizedCand.firstName} ${
+                normalizedCand.middleName ? normalizedCand.middleName + ' ' : ''
+              }${normalizedCand.surname}`.trim(),
             }
           : r
       );
     });
     if (eventTitle && eventMsg) {
-      addNotification(eventTitle, eventMsg, cand.pin ? 'pin' : 'payment');
+      addNotification(eventTitle, eventMsg, normalizedCand.pin ? 'pin' : 'payment');
     }
   };
 
@@ -750,7 +790,7 @@ export default function App() {
   };
 
   const handleDownloadAttemptedQuestions = (res: ExamResult) => {
-    downloadAttemptWithAiExplanationsPdf(res, settings, questions);
+    downloadCandidateQuestionsPdf(res, settings, questions);
   };
 
   const handleDownloadAttemptedExcel = (res: ExamResult) => {
@@ -770,6 +810,7 @@ export default function App() {
             activeCandidateId={activeRegCandidateId}
             onSetActiveCandidateId={setActiveRegCandidateId}
             onRegisterOrUpdateCandidate={handleRegisterOrUpdateCandidate}
+            onUpdateSettings={setSettings}
             onBackToLogin={() => {
               setRegInput('');
               setView('login');
@@ -1356,15 +1397,7 @@ export default function App() {
                     className="px-3.5 py-2 rounded-xl border border-[#0a6b3c] text-[#0a6b3c] hover:bg-[#0a6b3c]/10 text-xs font-extrabold flex items-center gap-1.5 cursor-pointer"
                   >
                     <Download className="w-3.5 h-3.5" />
-                    <span>Attempt PDF</span>
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => handleDownloadAttemptedExcel(activeExamResult)}
-                    className="px-3.5 py-2 rounded-xl border border-[#0a6b3c] text-[#0a6b3c] hover:bg-[#0a6b3c]/10 text-xs font-extrabold flex items-center gap-1.5 cursor-pointer"
-                  >
-                    <Download className="w-3.5 h-3.5" />
-                    <span>Attempt Excel</span>
+                    <span>Download Questions PDF</span>
                   </button>
                   <button
                     type="button"
@@ -1378,7 +1411,7 @@ export default function App() {
             </div>
           </div>
 
-          {/* Question Review & AI Evaluation Breakdown Card (Green check ✓ if correct, Red X ✗ if wrong, expandable "View AI Explanation") */}
+          {/* Questions With Official Answers Card (Matches Downloaded PDF: Just ✅ on correct MCQ options & Answer Key beneath TYA, no scoring/psychometric) */}
           {(() => {
             const attemptedItems = resolveAttemptedItemsForResult(
               activeExamResult,
@@ -1387,156 +1420,112 @@ export default function App() {
             if (attemptedItems.length === 0) return null;
             return (
               <div className="rounded-3xl bg-white border border-neutral-200 p-6 shadow-xs space-y-4">
-                <div className="flex flex-wrap items-center justify-between gap-2">
+                <div className="flex flex-wrap items-center justify-between gap-2 border-b border-neutral-200 pb-4">
                   <div>
                     <h2 className="text-base font-extrabold text-black">
-                      Attempted Questions &amp; AI Evaluation Review
+                      Questions &amp; Official Answer Keys
                     </h2>
                     <p className="text-xs text-neutral-500">
-                      Includes Multiple Choice (MCQ) and Type Your Answers (TYA) with scientific AI Evaluation explanations
+                      Correct MCQ options are marked with ✅ and TYA questions display the examiner Answer Key beneath each question.
                     </p>
                   </div>
-                  <div className="flex items-center gap-2">
+                  <div className="flex flex-wrap items-center gap-2">
                     <button
                       type="button"
-                      onClick={() => handleDownloadAttemptedQuestions(activeExamResult)}
-                      className="px-3 py-1.5 rounded-xl bg-[#0a6b3c] hover:bg-[#0e8a4e] text-white text-xs font-extrabold flex items-center gap-1.5 cursor-pointer"
+                      onClick={() =>
+                        downloadCandidateQuestionsPdf(
+                          activeExamResult,
+                          {
+                            ...settings,
+                            downloadMode: 'Download total questions attempted',
+                          },
+                          questions
+                        )
+                      }
+                      className="px-3.5 py-2 rounded-xl bg-[#0a6b3c] hover:bg-[#0e8a4e] text-white text-xs font-extrabold flex items-center gap-1.5 cursor-pointer"
                     >
                       <Download className="w-3.5 h-3.5" />
-                      <span>Download Attempt PDF</span>
+                      <span>Download Attempted Questions</span>
                     </button>
                     <button
                       type="button"
-                      onClick={() => handleDownloadAttemptedExcel(activeExamResult)}
-                      className="px-3 py-1.5 rounded-xl border border-[#0a6b3c] text-[#0a6b3c] hover:bg-[#0a6b3c]/10 text-xs font-extrabold flex items-center gap-1.5 cursor-pointer"
+                      onClick={() =>
+                        downloadCandidateQuestionsPdf(
+                          activeExamResult,
+                          {
+                            ...settings,
+                            downloadMode: 'Download failed questions only',
+                          },
+                          questions
+                        )
+                      }
+                      className="px-3.5 py-2 rounded-xl border border-[#0a6b3c] text-[#0a6b3c] hover:bg-[#0a6b3c]/10 text-xs font-extrabold flex items-center gap-1.5 cursor-pointer"
                     >
                       <Download className="w-3.5 h-3.5" />
-                      <span>Download Excel (CSV)</span>
+                      <span>Download Missed Questions</span>
                     </button>
                   </div>
                 </div>
 
-                <div className="space-y-3 max-h-[540px] overflow-y-auto pr-1">
+                <div className="space-y-4 max-h-[540px] overflow-y-auto pr-1">
                   {attemptedItems.map((item, idx) => {
                     const isTya = item.questionType === 'TYA';
-                    const isCorrect = isTya
-                      ? Boolean(item.isCorrect)
-                      : item.selectedAnswer === item.correctAnswer;
-                    const expKey = `res-${activeExamResult.id}-${item.id}-${idx}`;
-                    const isExpanded = Boolean(expandedResultAiExplanations[expKey]);
-                    const candidateAns = isTya
-                      ? item.typedAnswer || '(No Answer Typed)'
-                      : item.selectedAnswer !== null &&
-                        item.selectedAnswer !== undefined &&
-                        item.options[item.selectedAnswer]
-                      ? `${['A', 'B', 'C', 'D'][item.selectedAnswer]}. ${
-                          item.options[item.selectedAnswer]
-                        }`
-                      : 'Not Answered';
                     const officialKey = isTya
                       ? (item.answerKeys && item.answerKeys.length > 0
                           ? item.answerKeys
-                          : ['—']
-                        ).join(' / ')
-                      : item.options[item.correctAnswer]
-                      ? `${['A', 'B', 'C', 'D'][item.correctAnswer]}. ${
-                          item.options[item.correctAnswer]
-                        }`
-                      : '—';
-                    const maxM = item.maxMarks || 1;
-                    const awardedM =
-                      typeof item.marksAwarded === 'number'
-                        ? item.marksAwarded
-                        : isCorrect
-                        ? maxM
-                        : 0;
+                          : [item.options?.[0] || '—']
+                        ).join(' | ')
+                      : '';
+                    const letters = ['A', 'B', 'C', 'D'];
 
                     return (
                       <div
                         key={`${item.id}-${idx}`}
-                        className={`p-4 rounded-2xl border text-xs space-y-2 ${
-                          isCorrect
-                            ? 'bg-[#0a6b3c]/5 border-[#0a6b3c]/30'
-                            : 'bg-red-50/70 border-red-200'
-                        }`}
+                        className="p-4 rounded-2xl border border-neutral-200 bg-white text-xs space-y-2"
                       >
-                        <div className="flex items-start justify-between gap-3">
-                          <div className="font-bold text-black leading-relaxed">
-                            <span className="font-extrabold text-[#0a6b3c] mr-1.5">
-                              Q{idx + 1} ({item.subject} • {isTya ? 'TYA' : 'MCQ'}):
-                            </span>
-                            {item.questionText}
-                          </div>
-                          <span
-                            className={`px-2.5 py-1 rounded-full text-[11px] font-extrabold shrink-0 inline-flex items-center gap-1 ${
-                              isCorrect
-                                ? 'bg-[#0a6b3c] text-white'
-                                : 'bg-red-600 text-white'
-                            }`}
-                          >
-                            <span>{isCorrect ? '✓' : '✗'}</span>
-                            <span>
-                              {isCorrect ? 'CORRECT' : 'WRONG'} ({awardedM}/{maxM})
-                            </span>
-                          </span>
+                        <div className="text-[11px] font-extrabold text-[#0a6b3c]">
+                          Category: {item.subject}
+                        </div>
+                        <div className="font-normal text-black text-sm leading-relaxed">
+                          <span className="font-semibold mr-1.5">{idx + 1}.</span>
+                          {item.questionText}
                         </div>
 
-                        <div className="grid grid-cols-1 sm:grid-cols-3 gap-2 pt-1 text-[11px]">
-                          <div className="p-2 rounded-lg bg-white border border-neutral-200">
-                            <div className="text-neutral-500 font-semibold">
-                              Candidate Answer
-                            </div>
-                            <div
-                              className={`font-extrabold mt-0.5 ${
-                                isCorrect ? 'text-[#0a6b3c]' : 'text-red-600'
-                              }`}
-                            >
-                              {candidateAns}
-                            </div>
+                        {isTya ? (
+                          <div className="pl-4 pt-1">
+                            <span className="font-extrabold text-black text-xs">
+                              Answer Key: {officialKey}{' '}
+                              <span className="text-[#16a34a] font-extrabold">✓</span>
+                            </span>
                           </div>
-                          <div className="p-2 rounded-lg bg-white border border-neutral-200">
-                            <div className="text-neutral-500 font-semibold">
-                              Answer Key
+                        ) : (
+                          <div className="pl-4 space-y-1 pt-0.5">
+                            <div className="font-extrabold text-[11px] text-neutral-900">
+                              Options:
                             </div>
-                            <div className="font-extrabold text-black mt-0.5">
-                              {officialKey}
+                            <div className="pl-2 space-y-1">
+                              {(item.options || []).map((optText, oIdx) => {
+                                const isCorrectOpt = oIdx === item.correctAnswer;
+                                return (
+                                  <div
+                                    key={oIdx}
+                                    className={
+                                      isCorrectOpt
+                                        ? 'font-extrabold text-black'
+                                        : 'font-normal text-neutral-700'
+                                    }
+                                  >
+                                    {letters[oIdx] || String.fromCharCode(65 + oIdx)}.{' '}
+                                    {optText}{' '}
+                                    {isCorrectOpt && (
+                                      <span className="text-[#16a34a] font-extrabold ml-1">
+                                        ✓
+                                      </span>
+                                    )}
+                                  </div>
+                                );
+                              })}
                             </div>
-                          </div>
-                          <div className="p-2 rounded-lg bg-white border border-neutral-200">
-                            <div className="text-neutral-500 font-semibold">
-                              {isTya ? 'AI Evaluation' : 'Marking Status'}
-                            </div>
-                            <div
-                              className={`font-extrabold mt-0.5 ${
-                                isCorrect ? 'text-[#0a6b3c]' : 'text-red-600'
-                              }`}
-                            >
-                              {isCorrect ? 'CORRECT' : 'WRONG'} • Marks: {awardedM}/{maxM}
-                            </div>
-                          </div>
-                        </div>
-
-                        {item.aiExplanation && (
-                          <div className="pt-1">
-                            <button
-                              type="button"
-                              onClick={() =>
-                                setExpandedResultAiExplanations((prev) => ({
-                                  ...prev,
-                                  [expKey]: !prev[expKey],
-                                }))
-                              }
-                              className="px-3 py-1 rounded-lg bg-[#0a6b3c]/10 hover:bg-[#0a6b3c]/20 text-[#0a6b3c] text-[11px] font-extrabold cursor-pointer"
-                            >
-                              {isExpanded
-                                ? 'Hide AI Explanation ▲'
-                                : 'View AI Explanation ▼'}
-                            </button>
-                            {isExpanded && (
-                              <div className="mt-2 p-3 rounded-xl bg-white border border-[#0a6b3c]/30 text-xs italic text-neutral-700 leading-relaxed">
-                                {item.aiExplanation}
-                              </div>
-                            )}
                           </div>
                         )}
                       </div>

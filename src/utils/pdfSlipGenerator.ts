@@ -30,7 +30,11 @@ if (typeof window !== 'undefined') {
         ctx.clip();
         ctx.fillStyle = '#ffffff';
         ctx.fillRect(0, 0, size, size);
-        ctx.drawImage(img, 0, 0, size, size);
+        const minDim = Math.min(img.width, img.height);
+        const cropDim = minDim * 0.86;
+        const sx = (img.width - cropDim) / 2;
+        const sy = (img.height - cropDim) / 2;
+        ctx.drawImage(img, sx, sy, cropDim, cropDim, 0, 0, size, size);
         cachedCircularLogoPng = canvas.toDataURL('image/png');
       }
     } catch {

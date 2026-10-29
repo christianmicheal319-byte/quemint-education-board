@@ -100,6 +100,7 @@ import {
   downloadRegisteredCandidatesPdf,
 } from '../utils/pdfSlipGenerator';
 import {
+  SAMPLE_MCQ_BULK_TEXT,
   SAMPLE_20_BIOLOGY_TYA_6COL_TEXT,
   parseAnswerKeys,
   parseBulkQuestionsInput,
@@ -652,6 +653,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
   const [qMarkInput, setQMarkInput] = useState<number>(1);
   const [qAnswerKeysInput, setQAnswerKeysInput] = useState<string>('');
   const [qAllowAiEval, setQAllowAiEval] = useState<boolean>(true);
+  const [bulkQuestionFormat, setBulkQuestionFormat] = useState<QuestionType>('MCQ');
   const [bulkQuestionPasteText, setBulkQuestionPasteText] = useState<string>('');
   const [previewedBulkQuestions, setPreviewedBulkQuestions] = useState<Question[]>([]);
   const [expandedAiExplanations, setExpandedAiExplanations] = useState<Record<string, boolean>>({});
@@ -4132,111 +4134,230 @@ SET value = EXCLUDED.value,
                       </button>
                     </div>
 
-                    {/* Bulk Upload / Paste 6-Column Format (Supports MCQ & TYA) */}
+                    {/* Bulk Upload / Paste Questions (Select Questions Format Dropdown: MCQ or TYA) */}
                     <div className="p-6 rounded-2xl border-2 border-[#0a6b3c] bg-white text-black space-y-4">
                       <div className="flex flex-wrap items-center justify-between gap-2">
                         <div>
                           <h3 className="text-sm font-extrabold text-black">
-                            Bulk Upload / Paste Questions (6-Column MCQ &amp; TYA)
+                            Bulk Upload / Paste Questions
                           </h3>
                           <p className="text-[11px] text-neutral-600 mt-0.5">
-                            Column 2 detects <code className="font-mono font-bold text-[#0a6b3c]">MCQ</code> or{' '}
-                            <code className="font-mono font-bold text-[#0a6b3c]">TYA</code> automatically
+                            Select Questions Format below ({' '}
+                            <code className="font-mono font-bold text-[#0a6b3c]">MCQ</code> or{' '}
+                            <code className="font-mono font-bold text-[#0a6b3c]">TYA</code> ) and paste your questions directly
                           </p>
                         </div>
-                        <button
-                          type="button"
-                          onClick={() => {
-                            setBulkQuestionPasteText(SAMPLE_20_BIOLOGY_TYA_6COL_TEXT);
-                            const parsed = parseBulkQuestionsInput(
-                              SAMPLE_20_BIOLOGY_TYA_6COL_TEXT,
-                              qSubject,
-                              qCategory
-                            );
-                            setPreviewedBulkQuestions(parsed);
-                            triggerToast('Loaded 20 Biology TYA sample questions into preview.');
-                          }}
-                          className="px-3 py-1.5 rounded-lg bg-[#0a6b3c]/10 hover:bg-[#0a6b3c]/20 text-[#0a6b3c] text-[11px] font-extrabold cursor-pointer"
-                        >
-                          Load 20 Biology TYA Questions
-                        </button>
+                        {bulkQuestionFormat === 'MCQ' ? (
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setBulkQuestionPasteText(SAMPLE_MCQ_BULK_TEXT);
+                              const parsed = parseBulkQuestionsInput(
+                                SAMPLE_MCQ_BULK_TEXT,
+                                qSubject,
+                                qCategory,
+                                openedBankId || undefined,
+                                'MCQ'
+                              );
+                              setPreviewedBulkQuestions(parsed);
+                              triggerToast('Loaded sample MCQ questions into preview.');
+                            }}
+                            className="px-3 py-1.5 rounded-lg bg-[#0a6b3c]/10 hover:bg-[#0a6b3c]/20 text-[#0a6b3c] text-[11px] font-extrabold cursor-pointer"
+                          >
+                            Load Sample MCQ Questions
+                          </button>
+                        ) : (
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setBulkQuestionPasteText(SAMPLE_20_BIOLOGY_TYA_6COL_TEXT);
+                              const parsed = parseBulkQuestionsInput(
+                                SAMPLE_20_BIOLOGY_TYA_6COL_TEXT,
+                                qSubject,
+                                qCategory,
+                                openedBankId || undefined,
+                                'TYA'
+                              );
+                              setPreviewedBulkQuestions(parsed);
+                              triggerToast('Loaded 20 Biology TYA sample questions into preview.');
+                            }}
+                            className="px-3 py-1.5 rounded-lg bg-[#0a6b3c]/10 hover:bg-[#0a6b3c]/20 text-[#0a6b3c] text-[11px] font-extrabold cursor-pointer"
+                          >
+                            Load 20 Biology TYA Questions
+                          </button>
+                        )}
                       </div>
 
-                      <div className="p-3 rounded-xl bg-neutral-50 border border-neutral-200 text-[11px] space-y-1 font-mono text-neutral-700">
-                        <div className="font-sans font-extrabold text-black">
-                          Format A — MCQ (6 Columns):
+                      {/* Select Questions Format Dropdown */}
+                      <div className="p-3.5 rounded-xl bg-[#0a6b3c]/5 border border-[#0a6b3c]/25 space-y-2">
+                        <div className="flex flex-wrap items-center justify-between gap-2">
+                          <label className="block text-xs font-extrabold text-black">
+                            Select Questions Format
+                          </label>
+                          {bulkQuestionFormat === 'MCQ' ? (
+                            <span className="px-2.5 py-0.5 rounded-full bg-[#0a6b3c] text-white text-[10px] font-extrabold uppercase tracking-wider">
+                              No AI Evaluation Needed for MCQ
+                            </span>
+                          ) : (
+                            <span className="px-2.5 py-0.5 rounded-full bg-amber-500 text-black text-[10px] font-extrabold uppercase tracking-wider">
+                              TYA • AI Evaluation Enabled
+                            </span>
+                          )}
                         </div>
-                        <div>
-                          QNo | MCQ | Question | (A) Opt1 (B) Opt2 (C) Opt3 (D) Opt4 | C | 1
-                        </div>
-                        <div className="font-sans font-extrabold text-[#0a6b3c] pt-1">
-                          Format B — TYA (6 Columns):
-                        </div>
-                        <div>
-                          1 | TYA | Which part of the nephron is mainly responsible for ultrafiltration of blood? | Glomerulus | 1 | YES
-                        </div>
-                        <div>
-                          21 | TYA | Light dependent stage of photosynthesis occurs where? | Grana ; Thylakoid membrane | 1 | YES
-                        </div>
+                        <select
+                          value={bulkQuestionFormat}
+                          onChange={(e) => {
+                            const nextFormat = e.target.value as QuestionType;
+                            setBulkQuestionFormat(nextFormat);
+                            if (bulkQuestionPasteText.trim()) {
+                              setPreviewedBulkQuestions(
+                                parseBulkQuestionsInput(
+                                  bulkQuestionPasteText,
+                                  qSubject,
+                                  qCategory,
+                                  openedBankId || undefined,
+                                  nextFormat
+                                )
+                              );
+                            }
+                          }}
+                          className="w-full px-3.5 py-2.5 rounded-xl border-2 border-[#0a6b3c] bg-white text-xs font-extrabold text-black focus:outline-none cursor-pointer"
+                        >
+                          <option value="MCQ">
+                            MCQ — Multiple Choice Questions (Paste directly without typing |MCQ| • No AI Evaluation Needed)
+                          </option>
+                          <option value="TYA">
+                            TYA — Type Your Answers (Free-Text Answer Key + AI Evaluation)
+                          </option>
+                        </select>
                       </div>
+
+                      {/* Dynamic Format Guide based on selected format */}
+                      {bulkQuestionFormat === 'MCQ' ? (
+                        <div className="p-3 rounded-xl bg-neutral-50 border border-neutral-200 text-[11px] space-y-1.5 text-neutral-700">
+                          <div className="flex flex-wrap items-center justify-between gap-1">
+                            <span className="font-sans font-extrabold text-[#0a6b3c]">
+                              MCQ Paste Format (No need to type |MCQ| on each question):
+                            </span>
+                            <span className="font-sans font-bold text-[10px] text-neutral-600">
+                              Mark correct option with ✅ (or Answer: A) • No AI evaluation is needed for MCQ
+                            </span>
+                          </div>
+                          <pre className="font-mono text-[11px] text-black bg-white p-2.5 rounded-lg border border-neutral-200 whitespace-pre-wrap leading-relaxed">
+{`1. Crossing over in meiosis occurs where
+A. Prophase I ✅
+B. Anaphase
+C. Metaphase
+D. Prophase II`}
+                          </pre>
+                        </div>
+                      ) : (
+                        <div className="p-3 rounded-xl bg-neutral-50 border border-neutral-200 text-[11px] space-y-1 font-mono text-neutral-700">
+                          <div className="font-sans font-extrabold text-[#0a6b3c]">
+                            TYA Paste Format (With or without |TYA|):
+                          </div>
+                          <div>
+                            1 | TYA | Which part of the nephron is mainly responsible for ultrafiltration of blood? | Glomerulus | 1 | YES
+                          </div>
+                          <div>
+                            21 | TYA | Light dependent stage of photosynthesis occurs where? | Grana ; Thylakoid membrane | 1 | YES
+                          </div>
+                        </div>
+                      )}
 
                       <textarea
-                        rows={6}
+                        rows={7}
                         value={bulkQuestionPasteText}
                         onChange={(e) => {
                           const val = e.target.value;
                           setBulkQuestionPasteText(val);
                           setPreviewedBulkQuestions(
-                            parseBulkQuestionsInput(val, qSubject, qCategory)
+                            parseBulkQuestionsInput(
+                              val,
+                              qSubject,
+                              qCategory,
+                              openedBankId || undefined,
+                              bulkQuestionFormat
+                            )
                           );
                         }}
-                        placeholder={`1 | TYA | Which part of the nephron is mainly responsible for ultrafiltration of blood? | Glomerulus | 1 | YES\n2 | TYA | In which stage of mitosis do chromosomes align at the equator of the cell? | Metaphase | 1 | YES`}
+                        placeholder={
+                          bulkQuestionFormat === 'MCQ'
+                            ? `1. Crossing over in meiosis occurs where\nA. Prophase I ✅\nB. Anaphase\nC. Metaphase\nD. Prophase II\n\n2. Which organelle is known as the powerhouse of the cell?\nA. Nucleus\nB. Mitochondria ✅\nC. Ribosome\nD. Golgi apparatus`
+                            : `1 | TYA | Which part of the nephron is mainly responsible for ultrafiltration of blood? | Glomerulus | 1 | YES\n2 | TYA | In which stage of mitosis do chromosomes align at the equator of the cell? | Metaphase | 1 | YES`
+                        }
                         className="w-full p-3 rounded-xl border border-neutral-300 font-mono text-xs text-black"
                       />
 
                       {previewedBulkQuestions.length > 0 && (
                         <div className="p-3 rounded-xl bg-[#0a6b3c]/5 border border-[#0a6b3c]/25 space-y-2">
-                          <div className="flex items-center justify-between text-xs font-extrabold text-[#0a6b3c]">
+                          <div className="flex flex-wrap items-center justify-between gap-2 text-xs font-extrabold text-[#0a6b3c]">
                             <span>
                               Parsed {previewedBulkQuestions.length} Question(s) (
-                              {
-                                previewedBulkQuestions.filter(
-                                  (q) => q.questionType === 'TYA'
-                                ).length
-                              }{' '}
-                              TYA,{' '}
                               {
                                 previewedBulkQuestions.filter(
                                   (q) => q.questionType !== 'TYA'
                                 ).length
                               }{' '}
-                              MCQ)
+                              MCQ,{' '}
+                              {
+                                previewedBulkQuestions.filter(
+                                  (q) => q.questionType === 'TYA'
+                                ).length
+                              }{' '}
+                              TYA)
                             </span>
+                            {previewedBulkQuestions.every((q) => q.questionType !== 'TYA') && (
+                              <span className="text-[10px] font-extrabold text-neutral-700 bg-white px-2 py-0.5 rounded border border-neutral-200">
+                                Direct Option Marking • No AI Evaluation Needed
+                              </span>
+                            )}
                           </div>
-                          <div className="max-h-40 overflow-y-auto space-y-1.5 pr-1">
+                          <div className="max-h-48 overflow-y-auto space-y-1.5 pr-1">
                             {previewedBulkQuestions.map((pq, idx) => (
                               <div
                                 key={pq.id}
-                                className="p-2 rounded-lg bg-white border border-neutral-200 text-[11px] flex items-start justify-between gap-2"
+                                className="p-2.5 rounded-lg bg-white border border-neutral-200 text-[11px] flex items-start justify-between gap-2"
                               >
-                                <div>
-                                  <span
-                                    className={`inline-block px-1.5 py-0.5 rounded font-mono text-[10px] font-extrabold mr-1.5 ${
-                                      pq.questionType === 'TYA'
-                                        ? 'bg-amber-500/15 text-amber-800 border border-amber-500/30'
-                                        : 'bg-[#0a6b3c]/15 text-[#0a6b3c]'
-                                    }`}
-                                  >
-                                    {pq.questionType || 'MCQ'}
-                                  </span>
-                                  <span className="font-bold text-black">
-                                    {idx + 1}. {pq.questionText}
-                                  </span>
-                                  {pq.questionType === 'TYA' && (
-                                    <div className="text-[10px] text-[#0a6b3c] font-bold mt-0.5">
+                                <div className="space-y-1 w-full">
+                                  <div>
+                                    <span
+                                      className={`inline-block px-1.5 py-0.5 rounded font-mono text-[10px] font-extrabold mr-1.5 ${
+                                        pq.questionType === 'TYA'
+                                          ? 'bg-amber-500/15 text-amber-800 border border-amber-500/30'
+                                          : 'bg-[#0a6b3c]/15 text-[#0a6b3c]'
+                                      }`}
+                                    >
+                                      {pq.questionType || 'MCQ'}
+                                    </span>
+                                    <span className="font-bold text-black">
+                                      {idx + 1}. {pq.questionText}
+                                    </span>
+                                  </div>
+                                  {pq.questionType === 'TYA' ? (
+                                    <div className="text-[10px] text-[#0a6b3c] font-bold">
                                       Answer Key(s): {(pq.answerKeys || []).join(' | ')} • Mark:{' '}
                                       {pq.mark || 1} • AI Eval:{' '}
                                       {pq.allowAiEval !== false ? 'YES' : 'NO'}
+                                    </div>
+                                  ) : (
+                                    <div className="flex flex-wrap gap-1.5 pt-0.5">
+                                      {(pq.options || []).map((optText, oIdx) => {
+                                        const isCorrectOpt = pq.correctAnswer === oIdx;
+                                        return (
+                                          <span
+                                            key={oIdx}
+                                            className={`px-2 py-0.5 rounded text-[10px] font-bold border ${
+                                              isCorrectOpt
+                                                ? 'bg-[#0a6b3c] text-white border-[#0a6b3c]'
+                                                : 'bg-neutral-50 text-neutral-700 border-neutral-200'
+                                            }`}
+                                          >
+                                            {String.fromCharCode(65 + oIdx)}. {optText}{' '}
+                                            {isCorrectOpt ? '✅' : ''}
+                                          </span>
+                                        );
+                                      })}
                                     </div>
                                   )}
                                 </div>
@@ -4256,13 +4377,13 @@ SET value = EXCLUDED.value,
                           setBulkQuestionPasteText('');
                           setPreviewedBulkQuestions([]);
                           triggerToast(
-                            `Uploaded ${count} question(s) to ${qSubject} Question Bank.`
+                            `Uploaded ${count} ${bulkQuestionFormat} question(s) to ${qSubject} Question Bank.`
                           );
                         }}
                         className="w-full py-2.5 px-4 rounded-xl bg-[#0a6b3c] hover:bg-[#0e8a4e] disabled:opacity-40 text-white text-xs font-extrabold uppercase tracking-wider cursor-pointer"
                       >
-                        + Bulk Import {previewedBulkQuestions.length || ''} Question(s) to{' '}
-                        {qSubject}
+                        + Bulk Import {previewedBulkQuestions.length || ''} {bulkQuestionFormat}{' '}
+                        Question(s) to {qSubject}
                       </button>
                     </div>
                   </div>

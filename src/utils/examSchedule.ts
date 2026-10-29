@@ -1,81 +1,28 @@
-import { useState, useEffect, useMemo, useCallback, useRef } from 'react';
-import { ExamCenter, ExamScheduleItem } from '../types';
+import { useState, useEffect, useCallback, useMemo } from 'react';
+import { ExamCenter, ExamScheduleItem, ExamSettings } from '../types';
 
 export const AFRICA_LAGOS_TZ = 'Africa/Lagos';
 
-export type ScheduleStatusType = 'no_schedule' | 'upcoming' | 'live' | 'ended' | 'inactive';
-
-export interface ScheduleCheckResult {
+export interface CanAttemptExamResult {
   allowed: boolean;
-  status: ScheduleStatusType;
-  scheduleType: 'general' | 'per_centre' | 'none';
-  matchedSchedule: ExamScheduleItem | null;
-  examCode: string;
+  status: 'active' | 'before_start' | 'after_end' | 'no_schedule';
+  reason: string;
+  schedule: ExamScheduleItem | null;
   centreName: string;
-  startTimeIso: string | null;
-  endTimeIso: string | null;
-  startTimeFormatted: string; // e.g. "09:00 AM"
-  endTimeFormatted: string; // e.g. "12:00 PM"
-  endDateFormatted: string; // e.g. "28 Oct 2025"
-  startDateFormatted: string; // e.g. "28 Oct 2025"
-  timeUntilStartMs: number;
-  timeUntilEndMs: number;
-  countdownLabel: string; // e.g. "2h 15m 04s"
-  message: string; // Exact blocking or live message
-  bannerText: string; // Student UI card summary
+  startTimeMs: number | null;
+  endTimeMs: number | null;
   serverNowMs: number;
+  remainingSeconds: number | null;
+  secondsUntilStart: number | null;
 }
 
 /**
- * Converts a Date or ISO timestamp into `YYYY-MM-DDTHH:mm` formatted specifically in Africa/Lagos (UTC+1)
- * for `<input type="datetime-local" />`.
+ * Formats a Date or timestamp in Africa/Lagos (WAT, UTC+1) as 12-hour time e.g. "09:00 AM"
  */
-export function toLagosDateTimeLocalInput(isoOrDate: string | Date | undefined | null): string {
-  if (!isoOrDate) return '';
-  const d = typeof isoOrDate === 'string' ? new Date(isoOrDate) : isoOrDate;
-  if (isNaN(d.getTime())) return '';
-
-  // Africa/Lagos is permanently UTC+1 (no daylight saving)
-  const lagosMs = d.getTime() + 60 * 60 * 1000;
-  const lagosDate = new Date(lagosMs);
-  const year = lagosDate.getUTCFullYear();
-  const month = String(lagosDate.getUTCMonth() + 1).padStart(2, '0');
-  const day = String(lagosDate.getUTCDate()).padStart(2, '0');
-  const hours = String(lagosDate.getUTCHours()).padStart(2, '0');
-  const mins = String(lagosDate.getUTCMinutes()).padStart(2, '0');
-  return `${year}-${month}-${day}T${hours}:${mins}`;
-}
-
-/**
- * Converts a `<input type="datetime-local" />` string (`YYYY-MM-DDTHH:mm` or `YYYY-MM-DDTHH:mm:ss`)
- * interpreted in Africa/Lagos timezone (`+01:00`) into a canonical TIMESTAMPTZ string.
- */
-export function fromLagosDateTimeLocalInput(localInput: string): string {
-  const clean = (localInput || '').trim();
-  if (!clean) return '';
-  // If it already includes timezone offset or Z, normalize it
-  if (/[+-]\d{2}:\d{2}$/.test(clean) || clean.endsWith('Z')) {
-    const parsed = new Date(clean);
-    if (!isNaN(parsed.getTime())) {
-      const localPart = toLagosDateTimeLocalInput(parsed);
-      return `${localPart}:00+01:00`;
-    }
-  }
-  // Ensure seconds are present
-  const withSeconds = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$/.test(clean)
-    ? `${clean}:00`
-    : clean;
-  return `${withSeconds}+01:00`;
-}
-
-/**
- * Formats an ISO timestamp as 12-hour time in Africa/Lagos (e.g., "09:00 AM", "12:00 PM").
- */
-export function formatLagosTime12h(isoStr: string | undefined | null): string {
-  if (!isoStr) return '—';
-  const d = new Date(isoStr);
-  if (isNaN(d.getTime())) return '—';
+export function formatLagosTime12h(dateOrIso: string | number | Date): string {
   try {
+    const d = new Date(dateOrIso);
+    if (isNaN(d.getTime())) return 'N/A';
     return new Intl.DateTimeFormat('en-US', {
       timeZone: AFRICA_LAGOS_TZ,
       hour: '2-digit',
@@ -83,23 +30,17 @@ export function formatLagosTime12h(isoStr: string | undefined | null): string {
       hour12: true,
     }).format(d);
   } catch {
-    const lagosDate = new Date(d.getTime() + 3600000);
-    let h = lagosDate.getUTCHours();
-    const m = String(lagosDate.getUTCMinutes()).padStart(2, '0');
-    const ampm = h >= 12 ? 'PM' : 'AM';
-    h = h % 12 || 12;
-    return `${String(h).padStart(2, '0')}:${m} ${ampm}`;
+    return 'N/A';
   }
 }
 
 /**
- * Formats an ISO timestamp as short date in Africa/Lagos (e.g., "28 Oct 2025").
+ * Formats a Date or timestamp in Africa/Lagos (WAT, UTC+1) as short date e.g. "28 Oct 2025"
  */
-export function formatLagosDateShort(isoStr: string | undefined | null): string {
-  if (!isoStr) return '—';
-  const d = new Date(isoStr);
-  if (isNaN(d.getTime())) return '—';
+export function formatLagosDateShort(dateOrIso: string | number | Date): string {
   try {
+    const d = new Date(dateOrIso);
+    if (isNaN(d.getTime())) return 'N/A';
     return new Intl.DateTimeFormat('en-GB', {
       timeZone: AFRICA_LAGOS_TZ,
       day: '2-digit',
@@ -107,541 +48,384 @@ export function formatLagosDateShort(isoStr: string | undefined | null): string 
       year: 'numeric',
     }).format(d);
   } catch {
-    return d.toDateString();
+    return 'N/A';
   }
 }
 
 /**
- * Formats an ISO timestamp as full date + time in Africa/Lagos (e.g., "28 Oct 2025 09:00 AM").
+ * Formats a Date or timestamp in Africa/Lagos (WAT, UTC+1) as "28 Oct 2025 09:00 AM"
  */
-export function formatLagosDateTimeFull(isoStr: string | undefined | null): string {
-  if (!isoStr) return '—';
-  const datePart = formatLagosDateShort(isoStr);
-  const timePart = formatLagosTime12h(isoStr);
-  if (datePart === '—' || timePart === '—') return '—';
+export function formatLagosDateTimeFull(dateOrIso: string | number | Date): string {
+  const datePart = formatLagosDateShort(dateOrIso);
+  const timePart = formatLagosTime12h(dateOrIso);
+  if (datePart === 'N/A' || timePart === 'N/A') return 'N/A';
   return `${datePart} ${timePart}`;
 }
 
 /**
- * Formats milliseconds into human-readable countdown (e.g., "2h 15m 08s" or "45m 12s").
+ * Converts an ISO timestamp or Date into `YYYY-MM-DDTHH:mm` in Africa/Lagos (+01:00) for `<input type="datetime-local" />`
  */
-export function formatCountdownDuration(ms: number): string {
-  const safeMs = Math.max(0, ms);
-  const totalSeconds = Math.ceil(safeMs / 1000);
-  const days = Math.floor(totalSeconds / 86400);
-  const hours = Math.floor((totalSeconds % 86400) / 3600);
-  const minutes = Math.floor((totalSeconds % 3600) / 60);
-  const seconds = totalSeconds % 60;
-
-  if (days > 0) {
-    return `${days}d ${hours}h ${minutes}m ${seconds}s`;
+export function toLagosDateTimeLocalInput(isoOrDate?: string | number | Date): string {
+  if (!isoOrDate) return '';
+  try {
+    const d = new Date(isoOrDate);
+    if (isNaN(d.getTime())) return '';
+    // Africa/Lagos is permanently UTC+1 (no DST)
+    const lagosMs = d.getTime() + 60 * 60 * 1000;
+    const lagosDate = new Date(lagosMs);
+    return lagosDate.toISOString().slice(0, 16);
+  } catch {
+    return '';
   }
-  if (hours > 0) {
-    return `${hours}h ${minutes}m ${String(seconds).padStart(2, '0')}s`;
-  }
-  if (minutes > 0) {
-    return `${minutes}m ${String(seconds).padStart(2, '0')}s`;
-  }
-  return `${seconds}s`;
 }
 
 /**
- * Evaluates the status of a single schedule row relative to `nowMs`.
+ * Converts a `YYYY-MM-DDTHH:mm` string from `<input type="datetime-local" />` into an explicit Africa/Lagos TIMESTAMPTZ string (`+01:00`)
+ */
+export function fromLagosDateTimeLocalInput(localValue: string): string {
+  const trimmed = (localValue || '').trim();
+  if (!trimmed) return '';
+  if (/[+-]\d{2}:\d{2}$/.test(trimmed) || trimmed.endsWith('Z')) {
+    return new Date(trimmed).toISOString();
+  }
+  const withSeconds = trimmed.length === 16 ? `${trimmed}:00` : trimmed;
+  return `${withSeconds}+01:00`;
+}
+
+/**
+ * Formats seconds (or milliseconds if > 100000) into human-readable countdown e.g. "01h 24m 15s" or "14m 05s"
+ */
+export function formatCountdownDuration(val: number | null): string {
+  if (val === null || val <= 0) return '00m 00s';
+  const totalSeconds = val > 100000 ? Math.floor(val / 1000) : Math.floor(val);
+  const secs = Math.max(0, totalSeconds);
+  const days = Math.floor(secs / 86400);
+  const hours = Math.floor((secs % 86400) / 3600);
+  const minutes = Math.floor((secs % 3600) / 60);
+  const remSecs = secs % 60;
+
+  const pad = (n: number) => String(n).padStart(2, '0');
+  if (days > 0) {
+    return `${days}d ${pad(hours)}h ${pad(minutes)}m ${pad(remSecs)}s`;
+  }
+  if (hours > 0) {
+    return `${pad(hours)}h ${pad(minutes)}m ${pad(remSecs)}s`;
+  }
+  return `${pad(minutes)}m ${pad(remSecs)}s`;
+}
+
+/**
+ * Returns status badge info for a schedule row in Admin Schedule Manager
  */
 export function getScheduleRowStatus(
   schedule: ExamScheduleItem,
-  nowMs: number = Date.now()
+  serverNowMs: number
 ): {
-  status: ScheduleStatusType;
+  status: 'inactive' | 'upcoming' | 'live' | 'ended';
+  code: 'INACTIVE' | 'UPCOMING' | 'OPEN_NOW' | 'ENDED';
+  label: string;
+  countdownText: string;
   timeUntilStartMs: number;
   timeUntilEndMs: number;
-  countdownText: string;
 } {
+  const startMs = new Date(schedule.start_time).getTime();
+  const endMs = new Date(schedule.end_time).getTime();
+  const timeUntilStartMs = Math.max(0, startMs - serverNowMs);
+  const timeUntilEndMs = Math.max(0, endMs - serverNowMs);
+
   if (!schedule.is_active) {
     return {
       status: 'inactive',
-      timeUntilStartMs: 0,
-      timeUntilEndMs: 0,
-      countdownText: 'Inactive',
+      code: 'INACTIVE',
+      label: 'Inactive',
+      countdownText: 'Schedule Inactive',
+      timeUntilStartMs,
+      timeUntilEndMs,
     };
   }
-  const startMs = new Date(schedule.start_time).getTime();
-  const endMs = new Date(schedule.end_time).getTime();
-
-  if (isNaN(startMs) || isNaN(endMs)) {
-    return {
-      status: 'inactive',
-      timeUntilStartMs: 0,
-      timeUntilEndMs: 0,
-      countdownText: 'Invalid time',
-    };
-  }
-
-  if (nowMs < startMs) {
-    const diff = startMs - nowMs;
+  if (serverNowMs < startMs) {
     return {
       status: 'upcoming',
-      timeUntilStartMs: diff,
-      timeUntilEndMs: Math.max(0, endMs - nowMs),
-      countdownText: `Starts in ${formatCountdownDuration(diff)}`,
+      code: 'UPCOMING',
+      label: 'Scheduled (Upcoming)',
+      countdownText: `Starts in ${formatCountdownDuration(timeUntilStartMs)}`,
+      timeUntilStartMs,
+      timeUntilEndMs,
     };
   }
-
-  // Once it is passed end_time even by a millisecond / second (nowMs > endMs), it is ended!
-  if (nowMs <= endMs) {
-    const diff = endMs - nowMs;
+  if (serverNowMs > endMs) {
     return {
-      status: 'live',
+      status: 'ended',
+      code: 'ENDED',
+      label: 'Closed (Ended)',
+      countdownText: `Ended at ${formatLagosTime12h(endMs)}`,
       timeUntilStartMs: 0,
-      timeUntilEndMs: diff,
-      countdownText: `Time left: ${formatCountdownDuration(diff)}`,
+      timeUntilEndMs: 0,
     };
   }
-
   return {
-    status: 'ended',
+    status: 'live',
+    code: 'OPEN_NOW',
+    label: 'Active Now (Open)',
+    countdownText: `Closes in ${formatCountdownDuration(timeUntilEndMs)}`,
     timeUntilStartMs: 0,
-    timeUntilEndMs: 0,
-    countdownText: `Ended ${formatLagosDateTimeFull(schedule.end_time)}`,
+    timeUntilEndMs,
   };
 }
 
 /**
- * CORE ENFORCEMENT FUNCTION: canAttemptExam(student_exam_center_id, exam_code)
- *
- * 1. Check for per-centre schedule:
- *    SELECT * FROM exam_schedules WHERE exam_code = code AND exam_center_id = student_center AND is_active = true
- * 2. If found -> use that:
- *    - If now < start_time -> Block ("Exam not yet started. Your centre (Lagos Main) exam starts at 09:00 AM. Come back later." + countdown)
- *    - If now >= start_time AND now <= end_time -> Allow "Start Exam" button
- *    - If now > end_time (even by 1 second) -> Block ("Exam schedule for your centre (Lagos Main) has ended at 12:00 PM. You can no longer attempt QMT3045B.")
- * 3. If NOT found per-centre, check general:
- *    SELECT * FROM exam_schedules WHERE exam_code = code AND exam_center_id IS NULL AND is_active = true
- *    Same logic: now between start/end -> Allow, else block with message "General schedule for QMT3045B ended at..."
- * 4. If NO schedule set at all -> Allow anytime (backward compatibility)
+ * Core Enforcement Function: `canAttemptExam(student, exam_code)`
  */
 export function canAttemptExam(params: {
+  examCode: string;
+  studentCenterId?: string | null;
+  studentCenterName?: string | null;
   studentExamCenterId?: string | null;
   studentExamCenterName?: string | null;
-  examCode: string;
-  schedules: ExamScheduleItem[];
+  schedules?: ExamScheduleItem[];
   examCenters?: ExamCenter[];
   serverNowMs?: number;
-}): ScheduleCheckResult {
+}): CanAttemptExamResult {
   const {
-    studentExamCenterId,
-    studentExamCenterName,
     examCode,
     schedules = [],
     examCenters = [],
     serverNowMs = Date.now(),
   } = params;
+  const studentCenterId = params.studentCenterId ?? params.studentExamCenterId;
+  const studentCenterName = params.studentCenterName ?? params.studentExamCenterName;
 
   const cleanCode = (examCode || '').trim().toUpperCase();
-  const cleanCenterId = (studentExamCenterId || '').trim().toLowerCase();
-  const cleanCenterName = (studentExamCenterName || '').trim().toLowerCase();
+  const activeForCode = schedules.filter(
+    (s) => s && s.is_active && (s.exam_code || '').trim().toUpperCase() === cleanCode
+  );
 
-  // Resolve canonical centre ID and display name for the student
+  // Resolve display name of student's centre
   const matchedCenterObj = examCenters.find(
-    (c) =>
-      (cleanCenterId && c.id.trim().toLowerCase() === cleanCenterId) ||
-      (cleanCenterName && c.name.trim().toLowerCase() === cleanCenterName)
+    (ec) =>
+      (studentCenterId && ec.id === studentCenterId) ||
+      (studentCenterName &&
+        ec.name.trim().toLowerCase() === studentCenterName.trim().toLowerCase())
   );
-  const resolvedCenterId = matchedCenterObj?.id || studentExamCenterId || '';
-  const resolvedCenterName =
-    matchedCenterObj?.name || studentExamCenterName || 'Main Hall';
+  const resolvedCentreName =
+    matchedCenterObj?.name || studentCenterName || 'All Examination Centres';
+  const resolvedCentreId = matchedCenterObj?.id || studentCenterId || null;
 
-  // Filter active schedules for this exam_code
-  const activeForExam = schedules.filter(
-    (s) =>
-      s &&
-      s.is_active &&
-      (s.exam_code || '').trim().toUpperCase() === cleanCode
-  );
+  if (activeForCode.length === 0) {
+    return {
+      allowed: true,
+      status: 'no_schedule',
+      reason: 'No time-table restriction configured for this examination code.',
+      schedule: null,
+      centreName: resolvedCentreName,
+      startTimeMs: null,
+      endTimeMs: null,
+      serverNowMs,
+      remainingSeconds: null,
+      secondsUntilStart: null,
+    };
+  }
 
-  // 1. Check for per-centre schedule matching student's examination centre
-  const perCentreMatch = activeForExam.find((s) => {
-    if (s.schedule_type !== 'per_centre' && s.exam_center_id === null) {
-      return false;
-    }
-    const schedCenterId = (s.exam_center_id || '').trim().toLowerCase();
-    const schedCenterName = (s.exam_center_name || '').trim().toLowerCase();
-    if (
-      resolvedCenterId &&
-      schedCenterId &&
-      schedCenterId === resolvedCenterId.trim().toLowerCase()
-    ) {
-      return true;
-    }
-    if (cleanCenterId && schedCenterId && schedCenterId === cleanCenterId) {
-      return true;
-    }
-    if (cleanCenterName && schedCenterName && schedCenterName === cleanCenterName) {
-      return true;
-    }
-    if (
-      resolvedCenterName &&
-      schedCenterName &&
-      schedCenterName === resolvedCenterName.trim().toLowerCase()
-    ) {
-      return true;
-    }
-    return false;
-  });
+  // Step 2a: First check if specific schedule exists for (exam_code, student.exam_center_id)
+  let matchedSchedule: ExamScheduleItem | undefined;
+  if (resolvedCentreId) {
+    matchedSchedule = activeForCode.find(
+      (s) =>
+        s.schedule_type === 'per_centre' &&
+        s.exam_center_id &&
+        s.exam_center_id === resolvedCentreId
+    );
+  }
+  if (!matchedSchedule && studentCenterName) {
+    const cleanName = studentCenterName.trim().toLowerCase();
+    matchedSchedule = activeForCode.find(
+      (s) =>
+        s.schedule_type === 'per_centre' &&
+        (s.exam_center_name || '').trim().toLowerCase() === cleanName
+    );
+  }
 
-  // 2. If per-centre schedule found -> enforce it
-  if (perCentreMatch) {
-    const startMs = new Date(perCentreMatch.start_time).getTime();
-    const endMs = new Date(perCentreMatch.end_time).getTime();
-    const startTimeStr = formatLagosTime12h(perCentreMatch.start_time);
-    const endTimeStr = formatLagosTime12h(perCentreMatch.end_time);
-    const startDateStr = formatLagosDateShort(perCentreMatch.start_time);
-    const endDateStr = formatLagosDateShort(perCentreMatch.end_time);
-    const displayCentre = perCentreMatch.exam_center_name || resolvedCenterName;
+  // Step 2b: Else fallback to GENERAL schedule (exam_code, exam_center_id IS NULL)
+  if (!matchedSchedule) {
+    matchedSchedule = activeForCode.find(
+      (s) => s.schedule_type === 'general' || s.exam_center_id === null
+    );
+  }
 
-    if (serverNowMs < startMs) {
-      const diffMs = startMs - serverNowMs;
-      const countdown = formatCountdownDuration(diffMs);
-      return {
-        allowed: false,
-        status: 'upcoming',
-        scheduleType: 'per_centre',
-        matchedSchedule: perCentreMatch,
-        examCode: cleanCode,
-        centreName: displayCentre,
-        startTimeIso: perCentreMatch.start_time,
-        endTimeIso: perCentreMatch.end_time,
-        startTimeFormatted: startTimeStr,
-        endTimeFormatted: endTimeStr,
-        startDateFormatted: startDateStr,
-        endDateFormatted: endDateStr,
-        timeUntilStartMs: diffMs,
-        timeUntilEndMs: Math.max(0, endMs - serverNowMs),
-        countdownLabel: countdown,
-        message: `Exam not yet started. Your centre (${displayCentre}) exam starts at ${startTimeStr} (${startDateStr}). Come back later.`,
-        bannerText: `Your Exam Centre: ${displayCentre} | Scheduled: ${startTimeStr} - ${endTimeStr} WAT | Starts in ${countdown}`,
-        serverNowMs,
-      };
-    }
+  if (!matchedSchedule) {
+    return {
+      allowed: true,
+      status: 'no_schedule',
+      reason: 'No specific or general schedule assigned to your examination centre.',
+      schedule: null,
+      centreName: resolvedCentreName,
+      startTimeMs: null,
+      endTimeMs: null,
+      serverNowMs,
+      remainingSeconds: null,
+      secondsUntilStart: null,
+    };
+  }
 
-    if (serverNowMs >= startMs && serverNowMs <= endMs) {
-      const diffMs = endMs - serverNowMs;
-      const countdown = formatCountdownDuration(diffMs);
-      return {
-        allowed: true,
-        status: 'live',
-        scheduleType: 'per_centre',
-        matchedSchedule: perCentreMatch,
-        examCode: cleanCode,
-        centreName: displayCentre,
-        startTimeIso: perCentreMatch.start_time,
-        endTimeIso: perCentreMatch.end_time,
-        startTimeFormatted: startTimeStr,
-        endTimeFormatted: endTimeStr,
-        startDateFormatted: startDateStr,
-        endDateFormatted: endDateStr,
-        timeUntilStartMs: 0,
-        timeUntilEndMs: diffMs,
-        countdownLabel: countdown,
-        message: `LIVE NOW - Ends at ${endTimeStr} | Time left: ${countdown}`,
-        bannerText: `LIVE NOW - Ends at ${endTimeStr} | Time left: ${countdown}`,
-        serverNowMs,
-      };
-    }
+  const startMs = new Date(matchedSchedule.start_time).getTime();
+  const endMs = new Date(matchedSchedule.end_time).getTime();
+  const displayCentre =
+    matchedSchedule.schedule_type === 'per_centre'
+      ? matchedSchedule.exam_center_name || resolvedCentreName
+      : `${resolvedCentreName} (General Schedule)`;
 
-    // serverNowMs > endMs (even by 1 second) -> Block permanently
+  const startFormatted = `${formatLagosTime12h(startMs)} on ${formatLagosDateShort(startMs)}`;
+  const endFormatted = `${formatLagosTime12h(endMs)} on ${formatLagosDateShort(endMs)}`;
+
+  // Step 3a: Current server time < start_time
+  if (serverNowMs < startMs) {
+    const secondsUntilStart = Math.max(1, Math.ceil((startMs - serverNowMs) / 1000));
     return {
       allowed: false,
-      status: 'ended',
-      scheduleType: 'per_centre',
-      matchedSchedule: perCentreMatch,
-      examCode: cleanCode,
+      status: 'before_start',
+      reason: `Examination has not started yet for your centre (${displayCentre}). Scheduled: ${formatLagosTime12h(startMs)} - ${formatLagosTime12h(endMs)} (${formatLagosDateShort(startMs)}).`,
+      schedule: matchedSchedule,
       centreName: displayCentre,
-      startTimeIso: perCentreMatch.start_time,
-      endTimeIso: perCentreMatch.end_time,
-      startTimeFormatted: startTimeStr,
-      endTimeFormatted: endTimeStr,
-      startDateFormatted: startDateStr,
-      endDateFormatted: endDateStr,
-      timeUntilStartMs: 0,
-      timeUntilEndMs: 0,
-      countdownLabel: '0s',
-      message: `Exam schedule for your centre (${displayCentre}) has ended at ${endTimeStr}. You can no longer attempt ${cleanCode}.`,
-      bannerText: `Closed - Your centre schedule ended at ${endTimeStr} on ${endDateStr}`,
+      startTimeMs: startMs,
+      endTimeMs: endMs,
       serverNowMs,
+      remainingSeconds: null,
+      secondsUntilStart,
     };
   }
 
-  // 3. If NOT found per-centre, check general schedule (exam_center_id IS NULL or schedule_type === 'general')
-  const generalMatch = activeForExam.find(
-    (s) => s.exam_center_id === null || s.schedule_type === 'general'
-  );
-
-  if (generalMatch) {
-    const startMs = new Date(generalMatch.start_time).getTime();
-    const endMs = new Date(generalMatch.end_time).getTime();
-    const startTimeStr = formatLagosTime12h(generalMatch.start_time);
-    const endTimeStr = formatLagosTime12h(generalMatch.end_time);
-    const startDateStr = formatLagosDateShort(generalMatch.start_time);
-    const endDateStr = formatLagosDateShort(generalMatch.end_time);
-
-    if (serverNowMs < startMs) {
-      const diffMs = startMs - serverNowMs;
-      const countdown = formatCountdownDuration(diffMs);
-      return {
-        allowed: false,
-        status: 'upcoming',
-        scheduleType: 'general',
-        matchedSchedule: generalMatch,
-        examCode: cleanCode,
-        centreName: `${resolvedCenterName} (General Schedule)`,
-        startTimeIso: generalMatch.start_time,
-        endTimeIso: generalMatch.end_time,
-        startTimeFormatted: startTimeStr,
-        endTimeFormatted: endTimeStr,
-        startDateFormatted: startDateStr,
-        endDateFormatted: endDateStr,
-        timeUntilStartMs: diffMs,
-        timeUntilEndMs: Math.max(0, endMs - serverNowMs),
-        countdownLabel: countdown,
-        message: `Exam not yet started. General schedule for ${cleanCode} (${resolvedCenterName}) starts at ${startTimeStr} on ${startDateStr}. Come back later.`,
-        bannerText: `Your Exam Centre: ${resolvedCenterName} (All Centres) | Scheduled: ${startTimeStr} - ${endTimeStr} WAT | Starts in ${countdown}`,
-        serverNowMs,
-      };
-    }
-
-    if (serverNowMs >= startMs && serverNowMs <= endMs) {
-      const diffMs = endMs - serverNowMs;
-      const countdown = formatCountdownDuration(diffMs);
-      return {
-        allowed: true,
-        status: 'live',
-        scheduleType: 'general',
-        matchedSchedule: generalMatch,
-        examCode: cleanCode,
-        centreName: `${resolvedCenterName} (General Schedule)`,
-        startTimeIso: generalMatch.start_time,
-        endTimeIso: generalMatch.end_time,
-        startTimeFormatted: startTimeStr,
-        endTimeFormatted: endTimeStr,
-        startDateFormatted: startDateStr,
-        endDateFormatted: endDateStr,
-        timeUntilStartMs: 0,
-        timeUntilEndMs: diffMs,
-        countdownLabel: countdown,
-        message: `LIVE NOW - Ends at ${endTimeStr} | Time left: ${countdown}`,
-        bannerText: `LIVE NOW - Ends at ${endTimeStr} | Time left: ${countdown}`,
-        serverNowMs,
-      };
-    }
-
-    // serverNowMs > endMs (even by 1 second) -> Block permanently
+  // Step 3b: Current server time > end_time (even by 1 second e.g. 12:00:01 PM)
+  if (serverNowMs > endMs) {
     return {
       allowed: false,
-      status: 'ended',
-      scheduleType: 'general',
-      matchedSchedule: generalMatch,
-      examCode: cleanCode,
-      centreName: `${resolvedCenterName} (General Schedule)`,
-      startTimeIso: generalMatch.start_time,
-      endTimeIso: generalMatch.end_time,
-      startTimeFormatted: startTimeStr,
-      endTimeFormatted: endTimeStr,
-      startDateFormatted: startDateStr,
-      endDateFormatted: endDateStr,
-      timeUntilStartMs: 0,
-      timeUntilEndMs: 0,
-      countdownLabel: '0s',
-      message: `General schedule for ${cleanCode} ended at ${endTimeStr} on ${endDateStr}. You can no longer attempt ${cleanCode}.`,
-      bannerText: `Closed - General schedule for ${cleanCode} ended at ${endTimeStr} on ${endDateStr}`,
+      status: 'after_end',
+      reason: `Examination schedule has ended for your centre (${displayCentre}). Schedule was ${startFormatted} to ${endFormatted}. You can no longer attempt this exam.`,
+      schedule: matchedSchedule,
+      centreName: displayCentre,
+      startTimeMs: startMs,
+      endTimeMs: endMs,
       serverNowMs,
+      remainingSeconds: 0,
+      secondsUntilStart: 0,
     };
   }
 
-  // 4. If NO active schedule set for this exam_code:
-  // Wait — what if Admin configured per-centre schedules for OTHER centres on this exam_code,
-  // or what if no schedule exists at all?
-  // Per spec: "3. If NOT found per-centre, check general... 4. If NO schedule set at all -> Allow anytime (backward compatibility)"
+  // Step 3c: start_time <= now <= end_time -> Allow
+  const remainingSeconds = Math.max(0, Math.floor((endMs - serverNowMs) / 1000));
   return {
     allowed: true,
-    status: 'no_schedule',
-    scheduleType: 'none',
-    matchedSchedule: null,
-    examCode: cleanCode,
-    centreName: resolvedCenterName,
-    startTimeIso: null,
-    endTimeIso: null,
-    startTimeFormatted: 'Anytime',
-    endTimeFormatted: 'Anytime',
-    startDateFormatted: '',
-    endDateFormatted: '',
-    timeUntilStartMs: 0,
-    timeUntilEndMs: 0,
-    countdownLabel: '',
-    message: 'Open Schedule — Available to attempt anytime.',
-    bannerText: `Your Exam Centre: ${resolvedCenterName} | Open Schedule (No time restriction set)`,
+    status: 'active',
+    reason: `Examination schedule is ACTIVE for ${displayCentre} (${formatLagosTime12h(startMs)} - ${formatLagosTime12h(endMs)}).`,
+    schedule: matchedSchedule,
+    centreName: displayCentre,
+    startTimeMs: startMs,
+    endTimeMs: endMs,
     serverNowMs,
+    remainingSeconds,
+    secondsUntilStart: 0,
   };
 }
 
 /**
- * Hook that synchronizes with authoritative server time via `/api/time` (preventing client clock tampering)
- * and ticks every 1 second.
+ * Hook that maintains authoritative server time (`Africa/Lagos` UTC+1) so students cannot bypass schedules by changing their device clock.
  */
-export function useServerTime(syncIntervalMs = 15000): {
-  serverNowMs: number;
-  offsetMs: number;
-  resyncServerTime: () => Promise<number>;
-} {
-  const offsetRef = useRef<number>(0);
-  const [serverNowMs, setServerNowMs] = useState<number>(() => Date.now());
+export function useServerTime(syncIntervalMs = 15000) {
+  const [serverOffsetMs, setServerOffsetMs] = useState<number>(0);
+  const [tickNowMs, setTickNowMs] = useState<number>(() => Date.now());
 
-  const resyncServerTime = useCallback(async (): Promise<number> => {
+  const resyncServerTime = useCallback(async () => {
     try {
       const t0 = Date.now();
-      const res = await fetch('/api/time', { cache: 'no-store' });
-      if (res.ok) {
-        const data = await res.json();
-        if (typeof data?.serverTimeMs === 'number' && data.serverTimeMs > 0) {
-          const rttHalf = Math.round((Date.now() - t0) / 2);
-          const authoritativeNow = data.serverTimeMs + rttHalf;
-          offsetRef.current = authoritativeNow - Date.now();
-          setServerNowMs(authoritativeNow);
-          return authoritativeNow;
-        }
+      const res = await fetch('/api/time');
+      if (!res.ok) return;
+      const data = await res.json();
+      const t1 = Date.now();
+      const rttHalf = Math.round((t1 - t0) / 2);
+      if (typeof data?.serverTimeMs === 'number') {
+        const estimatedNow = data.serverTimeMs + rttHalf;
+        setServerOffsetMs(estimatedNow - Date.now());
+        setTickNowMs(Date.now());
       }
     } catch {
       // Fallback to current offset if offline
     }
-    const fallbackNow = Date.now() + offsetRef.current;
-    setServerNowMs(fallbackNow);
-    return fallbackNow;
   }, []);
 
   useEffect(() => {
     resyncServerTime();
-    const syncTimer = setInterval(() => {
-      resyncServerTime();
-    }, syncIntervalMs);
-    const tickTimer = setInterval(() => {
-      setServerNowMs(Date.now() + offsetRef.current);
+    const syncTimer = setInterval(resyncServerTime, syncIntervalMs);
+    const secondTicker = setInterval(() => {
+      setTickNowMs(Date.now());
     }, 1000);
     return () => {
       clearInterval(syncTimer);
-      clearInterval(tickTimer);
+      clearInterval(secondTicker);
     };
   }, [resyncServerTime, syncIntervalMs]);
 
   return {
-    serverNowMs,
-    offsetMs: offsetRef.current,
+    serverNowMs: tickNowMs + serverOffsetMs,
     resyncServerTime,
   };
 }
 
 /**
- * Enforcement Hook `useExamSchedule()`
- * Evaluates schedule status every second using authoritative server time and `/api/check-schedule`.
+ * React hook `useExamSchedule(examCode, studentCenterId, settings)` for real-time schedule enforcement & countdowns.
  */
 export function useExamSchedule(params: {
   examCode: string;
   studentCenterId?: string | null;
   studentCenterName?: string | null;
-  schedules?: ExamScheduleItem[];
-  examCenters?: ExamCenter[];
-}): ScheduleCheckResult & {
-  verifyWithServerApi: (targetExamCode?: string) => Promise<ScheduleCheckResult>;
-} {
-  const {
-    examCode,
-    studentCenterId,
-    studentCenterName,
-    schedules = [],
-    examCenters = [],
-  } = params;
+  settings: ExamSettings;
+}) {
+  const { serverNowMs, resyncServerTime } = useServerTime(10000);
 
-  const { serverNowMs, resyncServerTime } = useServerTime(12000);
-
-  const checkResult = useMemo(
-    () =>
-      canAttemptExam({
-        studentExamCenterId: studentCenterId,
-        studentExamCenterName: studentCenterName,
-        examCode,
-        schedules,
-        examCenters,
-        serverNowMs,
-      }),
-    [studentCenterId, studentCenterName, examCode, schedules, examCenters, serverNowMs]
-  );
-
-  const verifyWithServerApi = useCallback(
-    async (targetExamCode?: string): Promise<ScheduleCheckResult> => {
-      const codeToCheck = targetExamCode || examCode;
-      try {
-        const res = await fetch('/api/check-schedule', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            exam_code: codeToCheck,
-            exam_center_id: studentCenterId || null,
-            exam_center_name: studentCenterName || null,
-            schedules,
-            exam_centers: examCenters,
-          }),
-        });
-        if (res.ok) {
-          const data = await res.json();
-          if (data?.result) {
-            return data.result as ScheduleCheckResult;
-          }
-        }
-      } catch {
-        // Fallback to local evaluation with freshly synced server time
-      }
-      const freshNow = await resyncServerTime();
-      return canAttemptExam({
-        studentExamCenterId: studentCenterId,
-        studentExamCenterName: studentCenterName,
-        examCode: codeToCheck,
-        schedules,
-        examCenters,
-        serverNowMs: freshNow,
-      });
-    },
-    [examCode, studentCenterId, studentCenterName, schedules, examCenters, resyncServerTime]
-  );
+  const checkResult = useMemo(() => {
+    return canAttemptExam({
+      examCode: params.examCode,
+      studentCenterId: params.studentCenterId,
+      studentCenterName: params.studentCenterName,
+      schedules: params.settings.examSchedules || [],
+      examCenters: params.settings.examCenters || [],
+      serverNowMs,
+    });
+  }, [
+    params.examCode,
+    params.studentCenterId,
+    params.studentCenterName,
+    params.settings.examSchedules,
+    params.settings.examCenters,
+    serverNowMs,
+  ]);
 
   return {
     ...checkResult,
-    verifyWithServerApi,
+    resyncServerTime,
   };
 }
 
-export const EXAM_SCHEDULES_SQL_MIGRATION = `-- ============================================================================
--- QUEMINT CBT PLATFORM: EXAM SCHEDULES / TIME-TABLE (GENERAL + PER CENTRE)
--- Timezone: Africa/Lagos (WAT / UTC+1)
--- ============================================================================
+export const EXAM_SCHEDULES_SQL_MIGRATION = `-- Supabase / PostgreSQL Migration: exam_schedules table (Africa/Lagos WAT)
+CREATE TYPE schedule_type_enum AS ENUM ('general', 'per_centre');
 
-CREATE TABLE IF NOT EXISTS exam_schedules (
+CREATE TABLE IF NOT EXISTS public.exam_schedules (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  exam_code VARCHAR(64) NOT NULL REFERENCES exams(exam_code) ON DELETE CASCADE,
-  exam_center_id UUID NULL REFERENCES exam_centers(id) ON DELETE CASCADE,
-  schedule_type VARCHAR(20) NOT NULL CHECK (schedule_type IN ('general', 'per_centre')),
+  exam_code VARCHAR(64) NOT NULL REFERENCES public.exams(exam_code) ON DELETE CASCADE,
+  exam_center_id UUID NULL REFERENCES public.exam_centers(id) ON DELETE CASCADE,
+  schedule_type schedule_type_enum NOT NULL DEFAULT 'general',
   start_time TIMESTAMPTZ NOT NULL,
   end_time TIMESTAMPTZ NOT NULL,
   is_active BOOLEAN NOT NULL DEFAULT TRUE,
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-  CONSTRAINT chk_exam_schedule_end_after_start CHECK (end_time > start_time)
+  CONSTRAINT chk_end_after_start CHECK (end_time > start_time)
 );
 
--- Unique constraint for Per-Centre schedule: (exam_code, exam_center_id) WHERE exam_center_id IS NOT NULL
+-- Unique constraint for Per-Centre schedules: (exam_code, exam_center_id) WHERE exam_center_id IS NOT NULL
 CREATE UNIQUE INDEX IF NOT EXISTS idx_exam_schedules_per_centre_unique
-  ON exam_schedules (exam_code, exam_center_id)
+  ON public.exam_schedules (exam_code, exam_center_id)
   WHERE exam_center_id IS NOT NULL;
 
 -- Unique constraint for General schedule: (exam_code) WHERE exam_center_id IS NULL
 CREATE UNIQUE INDEX IF NOT EXISTS idx_exam_schedules_general_unique
-  ON exam_schedules (exam_code)
+  ON public.exam_schedules (exam_code)
   WHERE exam_center_id IS NULL;
 `;

@@ -340,13 +340,20 @@ export const RegistrationFlow: React.FC<RegistrationFlowProps> = ({
       setFormError('Please enter your Course of Study (Step B) before proceeding.');
       return false;
     }
-    const activeSubjs =
+    const finalCat = categoryConfirmedBadge ? category : categoryDraft;
+    let activeSubjs =
       confirmedSubjects.length > 0 ? confirmedSubjects : selectedSubjectsDraft;
     if (activeSubjs.length === 0) {
-      setFormError(
-        'Please select your subjects in Step C (Subject Combination) and click Confirm.'
+      const catCombo = subjectCombinations.find(
+        (sc) => sc.name.trim().toLowerCase() === finalCat.trim().toLowerCase()
       );
-      return false;
+      activeSubjs =
+        catCombo && catCombo.subjects.length > 0
+          ? catCombo.subjects
+          : ['English Language', 'Biology', 'Chemistry', 'Physics'];
+      setSelectedSubjectsDraft(activeSubjs);
+      setConfirmedSubjects(activeSubjs);
+      setSubjectConfirmedBadge(true);
     }
     if (requirePhotoCard && !passportDataUrl) {
       setFormError(
@@ -359,9 +366,20 @@ export const RegistrationFlow: React.FC<RegistrationFlowProps> = ({
   };
 
   const getCandidateExtraFields = (candId: string) => {
-    const finalSubjs =
-      confirmedSubjects.length > 0 ? confirmedSubjects : selectedSubjectsDraft;
     const finalCat = categoryConfirmedBadge ? category : categoryDraft;
+    const catCombo = subjectCombinations.find(
+      (sc) => sc.name.trim().toLowerCase() === finalCat.trim().toLowerCase()
+    );
+    const fallbackSubjs =
+      catCombo && catCombo.subjects.length > 0
+        ? catCombo.subjects
+        : ['English Language', 'Biology', 'Chemistry', 'Physics'];
+    const finalSubjs =
+      confirmedSubjects.length > 0
+        ? confirmedSubjects
+        : selectedSubjectsDraft.length > 0
+        ? selectedSubjectsDraft
+        : fallbackSubjs;
     const { examCenterId, examCenterName } = assignExamCenterAndIncrement(
       candId,
       selectedExamCenterId
@@ -1311,6 +1329,11 @@ export const RegistrationFlow: React.FC<RegistrationFlowProps> = ({
 
               {/* Save / Submit Registration Details for Admin Review */}
               <div className="pt-3 border-t border-neutral-100 space-y-2.5">
+                {formError && (
+                  <div className="p-3.5 rounded-xl bg-red-50 border border-red-200 text-red-800 text-xs font-extrabold">
+                    {formError}
+                  </div>
+                )}
                 {requirePhotoCard && !passportDataUrl && (
                   <div className="p-3 rounded-xl bg-amber-50 border border-amber-300 text-amber-900 text-xs font-bold flex items-center gap-2">
                     <Camera className="w-4 h-4 shrink-0 text-[#0a6b3c]" />

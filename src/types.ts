@@ -152,6 +152,8 @@ export interface BankPoolAllocation {
 export interface SubjectPoolConfig {
   subject: string;
   subjectTotal: number;
+  poolSize?: number;
+  enabled?: boolean;
   expanded?: boolean;
   banks: BankPoolAllocation[];
 }
@@ -223,15 +225,15 @@ export type QuestionDownloadMode =
 export type ExamScheduleType = 'general' | 'per_centre';
 
 export interface ExamScheduleItem {
-  id: string; // uuid PK
-  exam_code: string; // FK exams.exam_code e.g., QMT3045B
-  exam_center_id: string | null; // FK exam_centers - NULL means GENERAL schedule
-  exam_center_name?: string | null; // e.g., "Q Zone 1", "Lagos Main", or null for GENERAL
+  id: string;
+  exam_code: string; // e.g., "QMT3045B"
+  exam_center_id: string | null; // null means GENERAL schedule
+  exam_center_name?: string;
   schedule_type: ExamScheduleType; // 'general' | 'per_centre'
-  start_time: string; // TIMESTAMPTZ ISO string (Africa/Lagos +01:00)
-  end_time: string; // TIMESTAMPTZ ISO string (Africa/Lagos +01:00)
-  is_active: boolean; // default true
-  created_at: string; // TIMESTAMPTZ
+  start_time: string; // ISO string or Africa/Lagos TIMESTAMPTZ
+  end_time: string; // ISO string or Africa/Lagos TIMESTAMPTZ
+  is_active: boolean;
+  created_at: string;
 }
 
 export interface ExamSettings {

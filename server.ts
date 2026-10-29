@@ -301,6 +301,34 @@ async function startServer() {
     }
   }, 4000);
 
+  app.post('/api/candidates/register', (req, res) => {
+    const { candidate } = req.body || {};
+    if (!candidate || !candidate.id) {
+      res.status(400).json({ status: false, message: 'Invalid candidate payload' });
+      return;
+    }
+    const currentList = Array.isArray(sharedAppState.candidates)
+      ? [...sharedAppState.candidates]
+      : [];
+    const existingIdx = currentList.findIndex(
+      (c: any) =>
+        c &&
+        (c.id === candidate.id ||
+          (candidate.regNumber &&
+            c.regNumber &&
+            c.regNumber.trim().toUpperCase() === candidate.regNumber.trim().toUpperCase()))
+    );
+    if (existingIdx >= 0) {
+      currentList[existingIdx] = { ...currentList[existingIdx], ...candidate };
+    } else {
+      currentList.unshift(candidate);
+    }
+    sharedAppState.candidates = currentList;
+    sharedAppState.updatedAt = Date.now();
+    broadcastSsePayload({ type: 'APP_STATE_SYNC', state: sharedAppState });
+    res.json({ status: true, candidate, state: sharedAppState });
+  });
+
   app.get('/api/sync', (_req, res) => {
     res.json({
       status: true,
