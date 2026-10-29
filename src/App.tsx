@@ -52,6 +52,11 @@ import {
   resolveResultSlipFieldRows,
 } from './utils/pdfSlipGenerator';
 import { getCandidateHdPortraitUrl } from './utils/liveProctoringBus';
+import {
+  pushCloudCandidates,
+  pushCloudStateKind,
+  subscribeToCloudAppState,
+} from './utils/firebaseCloudSync';
 
 type AppView = 'login' | 'registration' | 'exam' | 'result' | 'admin';
 
@@ -348,9 +353,70 @@ export default function App() {
       // ignore SSE fallback to polling
     }
 
+    // Real-time Cloud Firestore synchronization (works across all devices on Vercel, GitHub, and AI Studio)
+    const cloudUnsub = subscribeToCloudAppState({
+      initialState: {
+        candidates,
+        questions,
+        settings,
+        results,
+        notifications,
+      },
+      onCandidatesChange: (cloudCandidates) => {
+        if (!isMounted) return;
+        skipNextServerPushRef.current = true;
+        setCandidates(
+          cloudCandidates.map((c) => ({
+            ...c,
+            category: normalizeCategoryName(c.category),
+            passportDataUrl: getCandidateHdPortraitUrl(c),
+          }))
+        );
+        setTimeout(() => {
+          skipNextServerPushRef.current = false;
+        }, 50);
+      },
+      onQuestionsChange: (cloudQuestions) => {
+        if (!isMounted) return;
+        skipNextServerPushRef.current = true;
+        setQuestions(cloudQuestions);
+        setTimeout(() => {
+          skipNextServerPushRef.current = false;
+        }, 50);
+      },
+      onSettingsChange: (cloudSettings) => {
+        if (!isMounted) return;
+        skipNextServerPushRef.current = true;
+        setSettings((prev) => ({
+          ...prev,
+          ...cloudSettings,
+        }));
+        setTimeout(() => {
+          skipNextServerPushRef.current = false;
+        }, 50);
+      },
+      onResultsChange: (cloudResults) => {
+        if (!isMounted) return;
+        skipNextServerPushRef.current = true;
+        setResults(cloudResults);
+        setTimeout(() => {
+          skipNextServerPushRef.current = false;
+        }, 50);
+      },
+      onNotificationsChange: (cloudNotifications) => {
+        if (!isMounted) return;
+        skipNextServerPushRef.current = true;
+        setNotifications(cloudNotifications);
+        setTimeout(() => {
+          skipNextServerPushRef.current = false;
+        }, 50);
+      },
+    });
+
     return () => {
       isMounted = false;
       clearInterval(pollTimer);
+      cloudUnsub();
       if (eventSource) {
         eventSource.close();
       }
@@ -365,6 +431,7 @@ export default function App() {
     }
     if (!skipNextServerPushRef.current) {
       localMutationLockUntilRef.current = Date.now() + 3000;
+      pushCloudCandidates(candidates, true).catch(() => {});
       fetch('/api/sync', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -391,6 +458,7 @@ export default function App() {
     }
     if (!skipNextServerPushRef.current) {
       localMutationLockUntilRef.current = Date.now() + 3000;
+      pushCloudStateKind('questions', questions).catch(() => {});
       fetch('/api/sync', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -417,6 +485,7 @@ export default function App() {
     }
     if (!skipNextServerPushRef.current) {
       localMutationLockUntilRef.current = Date.now() + 3000;
+      pushCloudStateKind('results', results).catch(() => {});
       fetch('/api/sync', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -447,6 +516,7 @@ export default function App() {
     document.documentElement.style.setProperty('--quemint-secondary', secondaryColor);
     if (!skipNextServerPushRef.current) {
       localMutationLockUntilRef.current = Date.now() + 3000;
+      pushCloudStateKind('settings', settings).catch(() => {});
       fetch('/api/sync', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -473,6 +543,7 @@ export default function App() {
     }
     if (!skipNextServerPushRef.current) {
       localMutationLockUntilRef.current = Date.now() + 3000;
+      pushCloudStateKind('notifications', notifications).catch(() => {});
       fetch('/api/sync', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },

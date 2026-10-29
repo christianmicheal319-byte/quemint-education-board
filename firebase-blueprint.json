@@ -1,0 +1,103 @@
+{
+  "entities": {
+    "CbtStateDoc": {
+      "title": "CbtStateDoc",
+      "description": "Shared CBT application state document for settings, questions, results, and notifications across all devices.",
+      "type": "object",
+      "properties": {
+        "kind": {
+          "type": "string",
+          "description": "Document state kind identifier",
+          "maxLength": 64
+        },
+        "payloadJson": {
+          "type": "string",
+          "description": "Serialized state payload for cross-device synchronization",
+          "maxLength": 950000
+        },
+        "updatedAt": {
+          "type": "number",
+          "description": "Epoch milliseconds when the state was last updated"
+        },
+        "updatedByDevice": {
+          "type": "string",
+          "description": "Identifier of the device that published the update",
+          "maxLength": 128
+        }
+      },
+      "required": ["kind", "payloadJson", "updatedAt"]
+    },
+    "CbtCandidateDoc": {
+      "title": "CbtCandidateDoc",
+      "description": "Registered CBT candidate profile and approval status synchronized across devices.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "Unique candidate ID",
+          "maxLength": 128
+        },
+        "regNumber": {
+          "type": "string",
+          "description": "Candidate registration number",
+          "maxLength": 64
+        },
+        "paymentStatus": {
+          "type": "string",
+          "description": "Candidate approval and payment status",
+          "maxLength": 32
+        },
+        "candidateJson": {
+          "type": "string",
+          "description": "Full candidate record payload including captured photo card",
+          "maxLength": 900000
+        },
+        "updatedAt": {
+          "type": "number",
+          "description": "Last modification timestamp in epoch ms"
+        }
+      },
+      "required": ["id", "candidateJson", "updatedAt"]
+    },
+    "CbtProctoringDoc": {
+      "title": "CbtProctoringDoc",
+      "description": "Real-time live exam telemetry for a candidate taking an exam.",
+      "type": "object",
+      "properties": {
+        "candidateId": {
+          "type": "string",
+          "description": "Candidate identifier",
+          "maxLength": 128
+        },
+        "active": {
+          "type": "boolean",
+          "description": "Whether the candidate is actively taking an exam"
+        },
+        "telemetryJson": {
+          "type": "string",
+          "description": "Serialized live telemetry snapshot",
+          "maxLength": 100000
+        },
+        "updatedAt": {
+          "type": "number",
+          "description": "Heartbeat timestamp in epoch ms"
+        }
+      },
+      "required": ["candidateId", "active", "telemetryJson", "updatedAt"]
+    }
+  },
+  "firestore": {
+    "/cbt_state/{docId}": {
+      "schema": "CbtStateDoc",
+      "description": "Stores shared CBT settings, question banks, results, and notifications across devices."
+    },
+    "/cbt_candidates/{candidateId}": {
+      "schema": "CbtCandidateDoc",
+      "description": "Stores individual registered candidates and their approval states across devices."
+    },
+    "/cbt_proctoring/{candidateId}": {
+      "schema": "CbtProctoringDoc",
+      "description": "Stores real-time live proctoring telemetry while candidates take exams."
+    }
+  }
+}

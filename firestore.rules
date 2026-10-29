@@ -1,0 +1,72 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() >= 1 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function isValidCbtStateDoc(data) {
+      return data.keys().hasAll(['kind', 'payloadJson', 'updatedAt']) &&
+        data.keys().hasOnly(['kind', 'payloadJson', 'updatedAt', 'updatedByDevice']) &&
+        data.kind is string && data.kind.size() >= 1 && data.kind.size() <= 64 &&
+        data.payloadJson is string && data.payloadJson.size() <= 950000 &&
+        data.updatedAt is number &&
+        (!('updatedByDevice' in data) || (data.updatedByDevice is string && data.updatedByDevice.size() <= 128));
+    }
+
+    function isValidCbtCandidateDoc(data) {
+      return data.keys().hasAll(['id', 'candidateJson', 'updatedAt']) &&
+        data.keys().hasOnly(['id', 'regNumber', 'paymentStatus', 'candidateJson', 'updatedAt', 'deleted']) &&
+        data.id is string && data.id.size() >= 1 && data.id.size() <= 128 &&
+        data.candidateJson is string && data.candidateJson.size() <= 900000 &&
+        data.updatedAt is number &&
+        (!('regNumber' in data) || (data.regNumber is string && data.regNumber.size() <= 64)) &&
+        (!('paymentStatus' in data) || (data.paymentStatus is string && data.paymentStatus.size() <= 32)) &&
+        (!('deleted' in data) || (data.deleted is bool));
+    }
+
+    function isValidCbtProctoringDoc(data) {
+      return data.keys().hasAll(['candidateId', 'active', 'telemetryJson', 'updatedAt']) &&
+        data.keys().hasOnly(['candidateId', 'active', 'telemetryJson', 'updatedAt']) &&
+        data.candidateId is string && data.candidateId.size() >= 1 && data.candidateId.size() <= 128 &&
+        data.active is bool &&
+        data.telemetryJson is string && data.telemetryJson.size() <= 100000 &&
+        data.updatedAt is number;
+    }
+
+    match /test/{docId} {
+      allow get: if isValidId(docId);
+    }
+
+    match /cbt_state/{docId} {
+      allow get: if isValidId(docId);
+      allow list: if resource.data.updatedAt is number;
+      allow create: if isValidId(docId) && isValidCbtStateDoc(incoming());
+      allow update: if isValidId(docId) && isValidCbtStateDoc(incoming());
+    }
+
+    match /cbt_candidates/{candidateId} {
+      allow get: if isValidId(candidateId);
+      allow list: if resource.data.updatedAt is number;
+      allow create: if isValidId(candidateId) && isValidCbtCandidateDoc(incoming());
+      allow update: if isValidId(candidateId) && isValidCbtCandidateDoc(incoming());
+      allow delete: if isValidId(candidateId);
+    }
+
+    match /cbt_proctoring/{candidateId} {
+      allow get: if isValidId(candidateId);
+      allow list: if resource.data.updatedAt is number;
+      allow create: if isValidId(candidateId) && isValidCbtProctoringDoc(incoming());
+      allow update: if isValidId(candidateId) && isValidCbtProctoringDoc(incoming());
+      allow delete: if isValidId(candidateId);
+    }
+  }
+}

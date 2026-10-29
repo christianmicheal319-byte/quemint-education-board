@@ -1,4 +1,9 @@
 import { Candidate, ExamResult } from '../types';
+import {
+  publishCloudProctoringTelemetry,
+  subscribeToCloudProctoring,
+  unpublishCloudProctoringTelemetry,
+} from './firebaseCloudSync';
 
 export const LIVE_SESSION_ACTIVE_WINDOW_MS = 120000;
 
@@ -255,6 +260,8 @@ export function publishCandidateLiveTelemetry(telemetry: LiveCandidateTelemetry)
     // ignore
   }
 
+  publishCloudProctoringTelemetry(enriched).catch(() => {});
+
   fetch('/api/proctoring/publish', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -331,6 +338,8 @@ export function unpublishCandidateLiveStream(candidateId: string): void {
   } catch {
     // ignore
   }
+
+  unpublishCloudProctoringTelemetry(candidateId).catch(() => {});
 
   fetch('/api/proctoring/unpublish', {
     method: 'POST',
@@ -481,8 +490,18 @@ export function subscribeToLiveProctoring(
   pollFeeds();
   const pollInterval = setInterval(pollFeeds, 800);
 
+  const cloudUnsub = subscribeToCloudProctoring(
+    (cloudTelemetryMap) => {
+      onTelemetryMap(cloudTelemetryMap);
+    },
+    (disconnectedCandidateId) => {
+      onDisconnect?.(disconnectedCandidateId);
+    }
+  );
+
   return () => {
     clearInterval(pollInterval);
+    cloudUnsub();
     window.removeEventListener('storage', handleStorageEvent);
     if (bc) {
       bc.removeEventListener('message', handleBcMessage);
