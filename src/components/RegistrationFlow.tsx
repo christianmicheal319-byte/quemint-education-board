@@ -196,7 +196,8 @@ export const RegistrationFlow: React.FC<RegistrationFlowProps> = ({
 
   const proofInputRef = useRef<HTMLInputElement>(null);
   const incrementedCenterForCandidateRef = useRef<Record<string, string>>({});
-  const requirePhotoCard = Boolean(settings.requirePhotoCardDuringRegistration);
+  const autoSyncCandidateIdRef = useRef<string | null>(activeCandidateId);
+  const requirePhotoCard = settings.requirePhotoCardDuringRegistration !== false;
 
   // Sync local fields when switching to a specific activeCandidateId
   useEffect(() => {
@@ -242,17 +243,13 @@ export const RegistrationFlow: React.FC<RegistrationFlowProps> = ({
   const handleToggleSubjectCheckbox = (subj: string) => {
     setSelectedSubjectsDraft((prev) => {
       const exists = prev.some((s) => s.toLowerCase() === subj.toLowerCase());
-      if (exists) {
-        const next = prev.filter((s) => s.toLowerCase() !== subj.toLowerCase());
-        setSubjectConfirmedBadge(false);
-        setConfirmedSubjects((prevConf) =>
-          prevConf.filter((s) => s.toLowerCase() !== subj.toLowerCase())
-        );
-        return next;
-      }
+      const next = exists
+        ? prev.filter((s) => s.toLowerCase() !== subj.toLowerCase())
+        : [...prev, subj];
       setFormError('');
-      setSubjectConfirmedBadge(false);
-      return [...prev, subj];
+      setConfirmedSubjects(next);
+      setSubjectConfirmedBadge(next.length > 0);
+      return next;
     });
   };
 
@@ -341,23 +338,17 @@ export const RegistrationFlow: React.FC<RegistrationFlowProps> = ({
       return false;
     }
     const finalCat = categoryConfirmedBadge ? category : categoryDraft;
-    let activeSubjs =
+    const activeSubjs =
       confirmedSubjects.length > 0 ? confirmedSubjects : selectedSubjectsDraft;
     if (activeSubjs.length === 0) {
-      const catCombo = subjectCombinations.find(
-        (sc) => sc.name.trim().toLowerCase() === finalCat.trim().toLowerCase()
-      );
-      activeSubjs =
-        catCombo && catCombo.subjects.length > 0
-          ? catCombo.subjects
-          : ['English Language', 'Biology', 'Chemistry', 'Physics'];
-      setSelectedSubjectsDraft(activeSubjs);
-      setConfirmedSubjects(activeSubjs);
-      setSubjectConfirmedBadge(true);
+      setFormError('Please select at least one subject in Step C (Subject Combination) before proceeding.');
+      return false;
     }
+    setConfirmedSubjects(activeSubjs);
+    setSubjectConfirmedBadge(true);
     if (requirePhotoCard && !passportDataUrl) {
       setFormError(
-        'Live Photo Card Capture is required. Please use the live camera below and align 1 face inside the oval guide before submitting.'
+        'Live Photo Card Capture (Last Step) is required. Please use the live camera session below and capture your photo before clicking Confirmed.'
       );
       return false;
     }
@@ -404,13 +395,140 @@ export const RegistrationFlow: React.FC<RegistrationFlowProps> = ({
   const handleLivePhotoCaptured = (dataUrl: string) => {
     setPassportDataUrl(dataUrl);
     setFormError('');
-    if (existingCandidate) {
+    const candId =
+      existingCandidate?.id || autoSyncCandidateIdRef.current || `cand-${Date.now()}`;
+    autoSyncCandidateIdRef.current = candId;
+    if (firstName.trim() && surname.trim()) {
+      const extraFields = getCandidateExtraFields(candId);
+      const generatedRegNo =
+        existingCandidate?.regNumber || generateUniqueQmtRegNumber(candidates);
+      const syncedCand: Candidate = {
+        id: candId,
+        firstName: firstName.trim(),
+        middleName: middleName.trim(),
+        surname: surname.trim(),
+        gender,
+        ...extraFields,
+        regNumber: generatedRegNo,
+        pin: existingCandidate?.pin || '',
+        paymentStatus: existingCandidate?.paymentStatus || 'Pending',
+        paymentMethod:
+          existingCandidate?.paymentMethod ||
+          (Boolean(settings.freeRegistration || settings.registrationFee === 0)
+            ? 'Free Registration'
+            : selectedPaymentMethod),
+        amountPaid: Boolean(settings.freeRegistration || settings.registrationFee === 0)
+          ? 0
+          : settings.registrationFee,
+        transactionRef:
+          existingCandidate?.transactionRef ||
+          `QMT-REG-${Date.now().toString().slice(-6)}`,
+        passportDataUrl: dataUrl,
+        suspended: existingCandidate?.suspended || false,
+        examAssigned: existingCandidate?.paymentStatus === 'Paid',
+        examDate: settings.defaultExamDate,
+        examTime: settings.defaultExamTime,
+        createdAt: existingCandidate?.createdAt || new Date().toISOString(),
+        updatedAt: Date.now(),
+      };
+      onSetActiveCandidateId(candId);
+      onRegisterOrUpdateCandidate(syncedCand);
+    } else if (existingCandidate) {
       onRegisterOrUpdateCandidate({
         ...existingCandidate,
         passportDataUrl: dataUrl,
+        updatedAt: Date.now(),
       });
     }
   };
+
+  // Auto-sync candidate registration details to Admin Panel during registration
+  useEffect(() => {
+    if (!firstName.trim() || !surname.trim()) return;
+    const timer = setTimeout(() => {
+      const candId =
+        existingCandidate?.id || autoSyncCandidateIdRef.current || `cand-${Date.now()}`;
+      autoSyncCandidateIdRef.current = candId;
+      const finalCat = categoryConfirmedBadge ? category : categoryDraft;
+      const activeSubjs =
+        confirmedSubjects.length > 0 ? confirmedSubjects : selectedSubjectsDraft;
+      const chosenCenter =
+        examCenters.find((ec) => ec.id === selectedExamCenterId) || availableExamCenters[0];
+      const generatedRegNo =
+        existingCandidate?.regNumber || generateUniqueQmtRegNumber(candidates);
+
+      const autoSyncedCand: Candidate = {
+        id: candId,
+        firstName: firstName.trim(),
+        middleName: middleName.trim(),
+        surname: surname.trim(),
+        gender,
+        email: email.trim(),
+        phone: phone.trim(),
+        password,
+        passwordHash: password.trim()
+          ? simpleFallbackHash(password.trim())
+          : existingCandidate?.passwordHash,
+        stateOfOrigin: stateOfOrigin.trim(),
+        courseOfStudy: courseOfStudy.trim(),
+        subjectCombination:
+          activeSubjs.length > 0
+            ? activeSubjs.join(', ')
+            : existingCandidate?.subjectCombination || '',
+        category: finalCat,
+        examCenterId: chosenCenter?.id || existingCandidate?.examCenterId,
+        examCenterName: chosenCenter?.name || existingCandidate?.examCenterName,
+        regNumber: generatedRegNo,
+        pin: existingCandidate?.pin || '',
+        paymentStatus: existingCandidate?.paymentStatus || 'Pending',
+        paymentMethod:
+          existingCandidate?.paymentMethod ||
+          (Boolean(settings.freeRegistration || settings.registrationFee === 0)
+            ? 'Free Registration'
+            : selectedPaymentMethod),
+        amountPaid: Boolean(settings.freeRegistration || settings.registrationFee === 0)
+          ? 0
+          : settings.registrationFee,
+        transactionRef:
+          existingCandidate?.transactionRef ||
+          `QMT-REG-${Date.now().toString().slice(-6)}`,
+        proofFileName: proofFileName || existingCandidate?.proofFileName,
+        proofDataUrl: proofDataUrl || existingCandidate?.proofDataUrl,
+        passportDataUrl: passportDataUrl || existingCandidate?.passportDataUrl || '',
+        dvaAccountNumber: existingCandidate?.dvaAccountNumber,
+        dvaBankName: existingCandidate?.dvaBankName,
+        suspended: existingCandidate?.suspended || false,
+        examAssigned: existingCandidate?.paymentStatus === 'Paid',
+        examDate: settings.defaultExamDate,
+        examTime: settings.defaultExamTime,
+        createdAt: existingCandidate?.createdAt || new Date().toISOString(),
+        updatedAt: Date.now(),
+      };
+
+      if (activeCandidateId !== candId) {
+        onSetActiveCandidateId(candId);
+      }
+      onRegisterOrUpdateCandidate(autoSyncedCand);
+    }, 450);
+
+    return () => clearTimeout(timer);
+  }, [
+    firstName,
+    middleName,
+    surname,
+    gender,
+    email,
+    phone,
+    password,
+    stateOfOrigin,
+    courseOfStudy,
+    confirmedSubjects,
+    selectedSubjectsDraft,
+    category,
+    categoryDraft,
+    selectedExamCenterId,
+    passportDataUrl,
+  ]);
 
   // A. Instant Transfer - Paystack DVA (/dedicated_account/assign + 8 sec auto-verification)
   const handleAssignDedicatedAccount = async () => {
@@ -514,6 +632,9 @@ export const RegistrationFlow: React.FC<RegistrationFlowProps> = ({
       }
 
       const extraFields = getCandidateExtraFields(candId);
+      const generatedRegNo =
+        existingCandidate?.regNumber || generateUniqueQmtRegNumber(candidates);
+      const isAlreadyApproved = existingCandidate?.paymentStatus === 'Paid';
       const updatedCand: Candidate = {
         id: candId,
         firstName: firstName.trim(),
@@ -521,9 +642,9 @@ export const RegistrationFlow: React.FC<RegistrationFlowProps> = ({
         surname: surname.trim(),
         gender,
         ...extraFields,
-        regNumber: existingCandidate?.regNumber || '',
+        regNumber: generatedRegNo,
         pin: generatedPin,
-        paymentStatus: 'Paid',
+        paymentStatus: isAlreadyApproved ? 'Paid' : 'Pending',
         paymentMethod: 'Instant Transfer (Paystack DVA)',
         amountPaid: settings.registrationFee,
         transactionRef: dvaAccount?.transactionRef || `QMT-DVA-${Date.now().toString().slice(-6)}`,
@@ -531,16 +652,17 @@ export const RegistrationFlow: React.FC<RegistrationFlowProps> = ({
         dvaBankName: dvaAccount?.bankName,
         passportDataUrl,
         suspended: false,
-        examAssigned: true,
+        examAssigned: isAlreadyApproved,
         examDate: settings.defaultExamDate,
         examTime: settings.defaultExamTime,
         createdAt: existingCandidate?.createdAt || new Date().toISOString(),
+        updatedAt: Date.now(),
       };
       onSetActiveCandidateId(candId);
       onRegisterOrUpdateCandidate(
         updatedCand,
-        'Paystack DVA Auto-Verified (8s)',
-        `${updatedCand.firstName} ${updatedCand.surname} (${updatedCand.category}) paid ₦${settings.registrationFee.toLocaleString()} via Paystack DVA. PIN ${generatedPin} written to GREEN BOX.`
+        'Paystack DVA Payment Submitted (Awaiting Admin Approval)',
+        `${updatedCand.firstName} ${updatedCand.surname} (${updatedCand.category}) completed Paystack DVA transfer (Reg No: ${generatedRegNo}). Awaiting Admin Approval in Admin Panel.`
       );
       setDvaCountdown(null);
     };
@@ -606,6 +728,9 @@ export const RegistrationFlow: React.FC<RegistrationFlowProps> = ({
       const candId = existingCandidate?.id || `cand-${Date.now()}`;
       const extraFields = getCandidateExtraFields(candId);
       const generatedPin = `QMT-${Math.floor(100000 + Math.random() * 900000)}`;
+      const generatedRegNo =
+        existingCandidate?.regNumber || generateUniqueQmtRegNumber(candidates);
+      const isAlreadyApproved = existingCandidate?.paymentStatus === 'Paid';
       const txRef = `QMT-CRD-${Date.now().toString().slice(-6)}`;
       const updatedCand: Candidate = {
         id: candId,
@@ -614,24 +739,25 @@ export const RegistrationFlow: React.FC<RegistrationFlowProps> = ({
         surname: surname.trim(),
         gender,
         ...extraFields,
-        regNumber: existingCandidate?.regNumber || '',
+        regNumber: generatedRegNo,
         pin: generatedPin,
-        paymentStatus: 'Paid',
+        paymentStatus: isAlreadyApproved ? 'Paid' : 'Pending',
         paymentMethod: 'Card Payment',
         amountPaid: settings.registrationFee,
         transactionRef: txRef,
         passportDataUrl,
         suspended: false,
-        examAssigned: true,
+        examAssigned: isAlreadyApproved,
         examDate: settings.defaultExamDate,
         examTime: settings.defaultExamTime,
         createdAt: existingCandidate?.createdAt || new Date().toISOString(),
+        updatedAt: Date.now(),
       };
       onSetActiveCandidateId(candId);
       onRegisterOrUpdateCandidate(
         updatedCand,
-        'Card Payment Confirmed',
-        `${updatedCand.firstName} ${updatedCand.surname} paid ₦${settings.registrationFee.toLocaleString()} via Card. PIN ${generatedPin} written to GREEN BOX.`
+        'Card Payment Submitted (Awaiting Admin Approval)',
+        `${updatedCand.firstName} ${updatedCand.surname} submitted Card Payment (Reg No: ${generatedRegNo}). Awaiting Admin Approval.`
       );
       setCardProcessing(false);
     }, 1500);
@@ -696,10 +822,11 @@ export const RegistrationFlow: React.FC<RegistrationFlowProps> = ({
   // Save / Submit Candidate Registration Bio-Data so Admin can view all filled details before approval
   const handleSaveRegistrationDetails = () => {
     if (!validateDetails()) return;
-    const generatedRegNo = isRegNumberGenerationAllowed
-      ? existingCandidate?.regNumber || generateUniqueQmtRegNumber(candidates)
-      : existingCandidate?.regNumber || '';
-    const candId = existingCandidate?.id || `cand-${Date.now()}`;
+    const generatedRegNo =
+      existingCandidate?.regNumber || generateUniqueQmtRegNumber(candidates);
+    const candId =
+      existingCandidate?.id || autoSyncCandidateIdRef.current || `cand-${Date.now()}`;
+    autoSyncCandidateIdRef.current = candId;
     const extraFields = getCandidateExtraFields(candId);
 
     const updatedCand: Candidate = {
@@ -732,21 +859,18 @@ export const RegistrationFlow: React.FC<RegistrationFlowProps> = ({
       examDate: settings.defaultExamDate,
       examTime: settings.defaultExamTime,
       createdAt: existingCandidate?.createdAt || new Date().toISOString(),
+      updatedAt: Date.now(),
     };
 
     onSetActiveCandidateId(candId);
     onRegisterOrUpdateCandidate(
       updatedCand,
       'Candidate Registration Submitted',
-      `${updatedCand.firstName} ${updatedCand.middleName ? updatedCand.middleName + ' ' : ''}${updatedCand.surname} (${updatedCand.gender}, ${updatedCand.category}${updatedCand.examCenterName ? ` • ${updatedCand.examCenterName}` : ''}) submitted registration details${generatedRegNo ? ` (Reg No: ${generatedRegNo})` : ' (Awaiting Admin Approval & QMT Reg Number Generation)'}.`
+      `${updatedCand.firstName} ${updatedCand.middleName ? updatedCand.middleName + ' ' : ''}${updatedCand.surname} (${updatedCand.gender}, ${updatedCand.category}${updatedCand.examCenterName ? ` • ${updatedCand.examCenterName}` : ''}) submitted registration details (Reg No: ${generatedRegNo} — Awaiting Admin Approval).`
     );
 
-    if (!isRegNumberGenerationAllowed) {
-      setShowConfirmedSuccessPopup(true);
-    } else {
-      setDetailsSavedBanner(true);
-      setTimeout(() => setDetailsSavedBanner(false), 5000);
-    }
+    setDetailsSavedBanner(true);
+    setShowConfirmedSuccessPopup(true);
   };
 
   const currentPin = existingCandidate?.pin || '';
@@ -782,6 +906,7 @@ export const RegistrationFlow: React.FC<RegistrationFlowProps> = ({
           <button
             type="button"
             onClick={() => {
+              autoSyncCandidateIdRef.current = null;
               onSetActiveCandidateId(null);
               setFirstName('');
               setMiddleName('');
@@ -795,6 +920,7 @@ export const RegistrationFlow: React.FC<RegistrationFlowProps> = ({
               setConfirmedSubjects([]);
               setSubjectConfirmedBadge(false);
               setIsSubjectDropdownOpen(false);
+              setPassportDataUrl('');
               setDvaAccount(null);
               setManualSubmitted(false);
             }}
@@ -1302,30 +1428,35 @@ export const RegistrationFlow: React.FC<RegistrationFlowProps> = ({
                 )}
               </div>
 
-              {/* STEP 02 (Only when Admin Require Photo Card During Registration == ON): Live Photo Capture */}
-              {requirePhotoCard && (
-                <div className="pt-3 border-t border-neutral-100 space-y-2">
-                  <div className="flex items-center justify-between">
+              {/* FINAL STEP OF REGISTRATION: Live Camera Capturing Session (Always Visible) */}
+              <div className="pt-4 border-t-2 border-[#0a6b3c]/20 space-y-2.5">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <div>
                     <span className="text-xs font-extrabold uppercase tracking-wider text-[#0a6b3c]">
-                      Step 02 • Compulsory Live Photo Capture
+                      Final Step • Live Camera Capturing Session
                     </span>
-                    <span
-                      className={`text-[11px] font-extrabold ${
-                        passportDataUrl ? 'text-[#0a6b3c]' : 'text-red-600'
-                      }`}
-                    >
-                      {passportDataUrl
-                        ? '✓ 1 Face Validated & Saved'
-                        : 'Required to Submit Registration'}
-                    </span>
+                    <p className="text-[11px] text-neutral-500 mt-0.5">
+                      Start the live camera below, align your face inside the oval guide, and click <strong>Capture &amp; Save Photo Card</strong> before clicking <strong>Confirmed</strong>.
+                    </p>
                   </div>
-                  <LivePhotoCaptureCard
-                    required={true}
-                    currentPhotoUrl={passportDataUrl}
-                    onPhotoCaptured={handleLivePhotoCaptured}
-                  />
+                  <span
+                    className={`px-2.5 py-1 rounded-full text-[11px] font-extrabold ${
+                      passportDataUrl
+                        ? 'bg-[#0a6b3c]/10 text-[#0a6b3c]'
+                        : 'bg-red-50 text-red-600'
+                    }`}
+                  >
+                    {passportDataUrl
+                      ? '✓ Live Photo Captured & Synced'
+                      : 'Required Before Confirmation'}
+                  </span>
                 </div>
-              )}
+                <LivePhotoCaptureCard
+                  required={requirePhotoCard}
+                  currentPhotoUrl={passportDataUrl}
+                  onPhotoCaptured={handleLivePhotoCaptured}
+                />
+              </div>
 
               {/* Save / Submit Registration Details for Admin Review */}
               <div className="pt-3 border-t border-neutral-100 space-y-2.5">
@@ -1338,7 +1469,7 @@ export const RegistrationFlow: React.FC<RegistrationFlowProps> = ({
                   <div className="p-3 rounded-xl bg-amber-50 border border-amber-300 text-amber-900 text-xs font-bold flex items-center gap-2">
                     <Camera className="w-4 h-4 shrink-0 text-[#0a6b3c]" />
                     <span>
-                      Please complete Live Photo Capture above (1 face inside the oval guide) to unlock the registration submit button.
+                      Please complete the Live Camera Capturing Session above (align your face inside the oval guide and click Capture &amp; Save Photo Card) to unlock the Confirmed button.
                     </span>
                   </div>
                 )}
@@ -1349,23 +1480,24 @@ export const RegistrationFlow: React.FC<RegistrationFlowProps> = ({
                   className="w-full py-3.5 px-4 rounded-xl bg-[#0a6b3c] hover:bg-[#0e8a4e] text-white font-extrabold text-sm uppercase tracking-wider flex items-center justify-center gap-2 transition-colors cursor-pointer shadow-xs disabled:opacity-50 disabled:cursor-not-allowed"
                 >
                   <CheckCircle2 className="w-4 h-4" />
-                  <span>
-                    {!isRegNumberGenerationAllowed
-                      ? 'Confirmed'
-                      : existingCandidate
-                      ? 'Update & Save Registration Details'
-                      : 'Submit Registration Details for Approval'}
-                  </span>
+                  <span>Confirmed — Submit Registration for Admin Approval</span>
                 </button>
-                {isRegNumberGenerationAllowed && (detailsSavedBanner || existingCandidate) && (
-                  <div className="p-3 rounded-xl bg-[#0a6b3c]/10 border border-[#0a6b3c]/30 flex flex-col sm:flex-row sm:items-center justify-between gap-2 text-xs">
-                    <span className="font-bold text-[#0a6b3c]">
-                      ✓ Registration details saved ({firstName} {middleName} {surname} • {gender} • {category} • {confirmedSubjects.join(', ')}). Admin can now view all your filled details before approval.
-                    </span>
+                {(detailsSavedBanner || existingCandidate) && (
+                  <div className="p-3.5 rounded-xl bg-[#0a6b3c]/10 border border-[#0a6b3c]/30 flex flex-col sm:flex-row sm:items-center justify-between gap-2 text-xs">
+                    <div className="space-y-0.5">
+                      <span className="font-extrabold text-[#0a6b3c] block">
+                        ✓ Auto-Synced to Admin Panel ({firstName} {middleName} {surname} • {gender} • {category} • {(confirmedSubjects.length > 0 ? confirmedSubjects : selectedSubjectsDraft).join(', ') || 'Subjects'})
+                      </span>
+                      {currentRegNo && (
+                        <span className="text-[11px] font-bold text-neutral-700 block">
+                          Registration Number: <strong className="font-mono text-[#0a6b3c]">{currentRegNo}</strong> ({isPaid ? 'Approved ✓' : 'Awaiting Admin Approval'})
+                        </span>
+                      )}
+                    </div>
                     <button
                       type="button"
                       onClick={onOpenAdminForConfirmation}
-                      className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg bg-[#0a6b3c] text-white text-[11px] font-bold hover:bg-[#0e8a4e] cursor-pointer whitespace-nowrap shrink-0"
+                      className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg bg-[#0a6b3c] text-white text-[11px] font-bold hover:bg-[#0e8a4e] cursor-pointer whitespace-nowrap shrink-0"
                     >
                       <span>View in Admin</span>
                       <ExternalLink className="w-3 h-3" />
@@ -2021,7 +2153,7 @@ export const RegistrationFlow: React.FC<RegistrationFlowProps> = ({
         </div>
       </main>
 
-      {/* Pop-up Modal when Registration Number Generation is Disallowed and Candidate clicks Confirmed */}
+      {/* Pop-up Modal when Candidate clicks Confirmed */}
       {showConfirmedSuccessPopup && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/65 p-4">
           <div className="w-full max-w-md bg-white text-black rounded-2xl border-2 border-[#0a6b3c] p-6 md:p-8 text-center space-y-5 shadow-2xl">
@@ -2030,23 +2162,62 @@ export const RegistrationFlow: React.FC<RegistrationFlowProps> = ({
             </div>
             <div className="space-y-2">
               <h3 className="text-lg font-extrabold text-[#0a6b3c] uppercase tracking-wide">
-                Registration Submitted
+                Registration Confirmed &amp; Synced
               </h3>
-              <p className="text-base font-bold text-black leading-relaxed">
-                your registration has been successfully submitted, you may leave
+              <p className="text-sm font-bold text-black leading-relaxed">
+                Your registration details and live photo have been automatically synced to the Admin Panel.
               </p>
+              {currentRegNo && (
+                <div className="p-3.5 rounded-xl bg-[#0a6b3c]/10 border border-[#0a6b3c] space-y-2 mt-2">
+                  <div className="text-[11px] font-extrabold uppercase tracking-wider text-[#0a6b3c]">
+                    Your Registration Number
+                  </div>
+                  <div className="font-mono text-xl font-extrabold text-black tracking-wider">
+                    {currentRegNo}
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => handleCopy(currentRegNo, 'popup-reg-no')}
+                    className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-[#0a6b3c] text-white text-xs font-extrabold hover:bg-[#0e8a4e] cursor-pointer"
+                  >
+                    {copiedKey === 'popup-reg-no' ? (
+                      <>
+                        <Check className="w-3.5 h-3.5" />
+                        <span>Copied!</span>
+                      </>
+                    ) : (
+                      <>
+                        <Copy className="w-3.5 h-3.5" />
+                        <span>Copy Registration Number</span>
+                      </>
+                    )}
+                  </button>
+                  <p className="text-[11px] font-semibold text-amber-800 pt-1">
+                    Note: Once Admin approves your registration in the Admin Panel, your Registration Number will be active for login.
+                  </p>
+                </div>
+              )}
             </div>
-            <button
-              type="button"
-              onClick={() => {
-                setShowConfirmedSuccessPopup(false);
-                onSetActiveCandidateId(null);
-                onBackToLogin();
-              }}
-              className="w-full py-3.5 px-6 rounded-xl bg-[#0a6b3c] hover:bg-[#0e8a4e] text-white font-extrabold text-sm uppercase tracking-wider transition-colors cursor-pointer shadow-xs"
-            >
-              Okay
-            </button>
+            <div className="flex flex-col sm:flex-row gap-2.5">
+              <button
+                type="button"
+                onClick={() => setShowConfirmedSuccessPopup(false)}
+                className="flex-1 py-3 px-4 rounded-xl border border-neutral-300 text-black font-bold text-xs uppercase tracking-wider hover:bg-neutral-50 transition-colors cursor-pointer"
+              >
+                Stay on Page
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  const regToPrefill = currentRegNo || undefined;
+                  setShowConfirmedSuccessPopup(false);
+                  onBackToLogin(regToPrefill);
+                }}
+                className="flex-1 py-3 px-4 rounded-xl bg-[#0a6b3c] hover:bg-[#0e8a4e] text-white font-extrabold text-xs uppercase tracking-wider transition-colors cursor-pointer shadow-xs"
+              >
+                Go to Candidate Login
+              </button>
+            </div>
           </div>
         </div>
       )}

@@ -1,6 +1,6 @@
 import { Candidate, ExamResult } from '../types';
 
-export const LIVE_SESSION_ACTIVE_WINDOW_MS = 35000;
+export const LIVE_SESSION_ACTIVE_WINDOW_MS = 120000;
 
 export interface LiveCandidateTelemetry {
   candidateId: string;
@@ -8,8 +8,13 @@ export interface LiveCandidateTelemetry {
   candidateName: string;
   category: string;
   gender: 'Male' | 'Female';
+  testTitle?: string;
+  testCode?: string;
+  examStage?: string;
   currentSubject: string;
   currentQuestionIndex: number;
+  currentQuestionText?: string;
+  selectedOptionLetter?: string;
   totalQuestions: number;
   answeredCount: number;
   correctCount: number;
@@ -39,6 +44,46 @@ const LIVE_TELEMETRY_STORAGE_KEY = 'quemint_live_telemetry_v4';
 const LIVE_FRAMES_STORAGE_KEY = 'quemint_live_frames_v4';
 const BROADCAST_CHANNEL_NAME = 'quemint_live_proctoring_channel_v4';
 
+const FEMALE_PORTRAITS = [
+  '/proctoring/cand_f1_hd.jpg',
+  '/proctoring/cand_f2_hd.jpg',
+  '/proctoring/cand_f3_hd.jpg',
+  '/proctoring/cand_f4_hd.jpg',
+  '/proctoring/cand_f5_hd.jpg',
+];
+
+const MALE_PORTRAITS = [
+  '/proctoring/cand_m1_hd.jpg',
+  '/proctoring/cand_m2_hd.jpg',
+  '/proctoring/cand_m3_hd.jpg',
+  '/proctoring/cand_m4_hd.jpg',
+  '/proctoring/cand_m5.jpg',
+];
+
+const FEMALE_VIDEOS = [
+  '/proctoring/vid_f1.mp4',
+  '/proctoring/vid_f2.mp4',
+  '/proctoring/vid_f3.mp4',
+  '/proctoring/vid_f4.mp4',
+];
+
+const MALE_VIDEOS = [
+  '/proctoring/vid_m1.mp4',
+  '/proctoring/vid_m2.mp4',
+  '/proctoring/vid_m3.mp4',
+  '/proctoring/vid_m4.mp4',
+];
+
+function getCandidateStableIndex(candidate: Partial<Candidate>, fallbackIndex = 0): number {
+  const key = `${candidate.id || ''}-${candidate.regNumber || ''}-${candidate.firstName || ''}-${candidate.surname || ''}`;
+  if (!key.replace(/-/g, '').trim()) return fallbackIndex;
+  let hash = 0;
+  for (let i = 0; i < key.length; i++) {
+    hash = (hash * 31 + key.charCodeAt(i)) >>> 0;
+  }
+  return hash;
+}
+
 export function getLocalDeviceId(): string {
   if (typeof window === 'undefined') return 'server';
   try {
@@ -55,24 +100,23 @@ export function getLocalDeviceId(): string {
 
 export function getCandidateHdPortraitUrl(candidate: Partial<Candidate>): string {
   const existing = (candidate.passportDataUrl || '').trim();
-  if (existing && !existing.startsWith('/proctoring/')) {
+  if (existing) {
     return existing;
   }
-  const initials = `${(candidate.firstName || 'C')[0] || 'C'}${
-    (candidate.surname || 'S')[0] || 'S'
-  }`.toUpperCase();
-  const fullName = `${candidate.firstName || 'Candidate'} ${candidate.surname || ''}`.trim();
-  const regNo = candidate.regNumber || 'QMT-CANDIDATE';
-  const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="240" height="240" viewBox="0 0 240 240">
-    <rect width="240" height="240" rx="24" fill="#0a6b3c"/>
-    <circle cx="120" cy="86" r="42" fill="#0e8a4e" stroke="#ffffff" stroke-width="3"/>
-    <path d="M48 212 C48 164 192 164 192 212" fill="#0e8a4e" stroke="#ffffff" stroke-width="3"/>
-    <text x="120" y="98" text-anchor="middle" fill="#ffffff" font-family="Arial, sans-serif" font-size="30" font-weight="bold">${initials}</text>
-    <rect x="16" y="198" width="208" height="28" rx="8" fill="#000000" fill-opacity="0.55"/>
-    <text x="120" y="216" text-anchor="middle" fill="#ffffff" font-family="monospace" font-size="11" font-weight="bold">${regNo.slice(0, 18)}</text>
-    <title>${fullName}</title>
-  </svg>`;
-  return `data:image/svg+xml;utf8,${encodeURIComponent(svg)}`;
+  const idx = getCandidateStableIndex(candidate);
+  const isMale = (candidate.gender || '').toLowerCase() === 'male';
+  const pool = isMale ? MALE_PORTRAITS : FEMALE_PORTRAITS;
+  return pool[idx % pool.length];
+}
+
+export function getCandidateLiveExamVideoUrl(
+  candidate: Partial<Candidate>,
+  fallbackIndex = 0
+): string {
+  const idx = getCandidateStableIndex(candidate, fallbackIndex);
+  const isMale = (candidate.gender || '').toLowerCase() === 'male';
+  const pool = isMale ? MALE_VIDEOS : FEMALE_VIDEOS;
+  return pool[idx % pool.length];
 }
 
 export function buildInitialCandidateTelemetry(
@@ -288,7 +332,7 @@ export function unpublishCandidateLiveStream(candidateId: string): void {
     // ignore
   }
 
-  fetch('/api/proctoring/disconnect', {
+  fetch('/api/proctoring/unpublish', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ candidateId }),
@@ -361,7 +405,10 @@ export function subscribeToLiveProctoring(
           if (Object.keys(batchMap).length > 0) {
             onTelemetryMap(batchMap);
           }
-        } else if (parsed.type === 'FEED_UPDATE' && parsed.feed) {
+        } else if (
+          (parsed.type === 'CANDIDATE_FEED' || parsed.type === 'FEED_UPDATE') &&
+          parsed.feed
+        ) {
           const f = parsed.feed;
           if (f.candidateId && f.telemetry) {
             emitSingleTelemetry(f.candidateId, f.telemetry);
@@ -379,6 +426,29 @@ export function subscribeToLiveProctoring(
   } catch {
     es = null;
   }
+
+  const handleStorageEvent = (e: StorageEvent) => {
+    try {
+      if (e.key === LIVE_TELEMETRY_STORAGE_KEY && e.newValue) {
+        const parsedMap = JSON.parse(e.newValue);
+        if (parsedMap && typeof parsedMap === 'object') {
+          onTelemetryMap(parsedMap);
+        }
+      } else if (e.key === LIVE_FRAMES_STORAGE_KEY && e.newValue) {
+        const parsedFrames = JSON.parse(e.newValue);
+        if (parsedFrames && typeof parsedFrames === 'object') {
+          Object.entries(parsedFrames).forEach(([cid, frameUrl]) => {
+            if (typeof frameUrl === 'string' && frameUrl.length > 0) {
+              onFrame(cid, frameUrl);
+            }
+          });
+        }
+      }
+    } catch {
+      // ignore
+    }
+  };
+  window.addEventListener('storage', handleStorageEvent);
 
   const pollFeeds = async () => {
     try {
@@ -409,10 +479,11 @@ export function subscribeToLiveProctoring(
   };
 
   pollFeeds();
-  const pollInterval = setInterval(pollFeeds, 2500);
+  const pollInterval = setInterval(pollFeeds, 800);
 
   return () => {
     clearInterval(pollInterval);
+    window.removeEventListener('storage', handleStorageEvent);
     if (bc) {
       bc.removeEventListener('message', handleBcMessage);
       bc.close();

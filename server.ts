@@ -288,16 +288,16 @@ async function startServer() {
     }
   };
 
-  // Clean up stale ephemeral feeds older than 15 seconds so nothing is retained after a student leaves
+  // Clean up stale ephemeral feeds older than 120 seconds so background tabs stay connected while active
   setInterval(() => {
     const now = Date.now();
     for (const [cid, entry] of activeCandidateFeeds.entries()) {
-      if (now - entry.updatedAt > 15000) {
+      if (now - entry.updatedAt > 120000) {
         activeCandidateFeeds.delete(cid);
         broadcastSsePayload({ type: 'CANDIDATE_DISCONNECTED', candidateId: cid });
       }
     }
-  }, 4000);
+  }, 5000);
 
   app.get('/api/sync', (_req, res) => {
     res.json({
@@ -307,14 +307,42 @@ async function startServer() {
   });
 
   app.post('/api/sync', (req, res) => {
-    const { candidates, questions, settings, results, notifications } = req.body || {};
+    const { candidates, replaceCandidates, questions, settings, results, notifications } = req.body || {};
     let changed = false;
 
     if (Array.isArray(candidates)) {
-      // Merge candidates by id so a new registration on a student device never gets overwritten by an older admin list
-      if (Array.isArray(sharedAppState.candidates) && sharedAppState.candidates.length > 0 && candidates.length > 0) {
+      if (replaceCandidates) {
+        sharedAppState.candidates = candidates;
+      } else if (Array.isArray(sharedAppState.candidates) && sharedAppState.candidates.length > 0 && candidates.length > 0) {
+        const existingMap = new Map(sharedAppState.candidates.map((c: any) => [c.id, c]));
         const incomingMap = new Map(candidates.map((c: any) => [c.id, c]));
-        const merged: any[] = [...candidates];
+        const merged: any[] = [];
+
+        for (const inc of candidates) {
+          if (!inc || !inc.id) continue;
+          const ex = existingMap.get(inc.id);
+          if (!ex) {
+            merged.push(inc);
+          } else {
+            const incTime = typeof inc.updatedAt === 'number' ? inc.updatedAt : 0;
+            const exTime = typeof ex.updatedAt === 'number' ? ex.updatedAt : 0;
+            const newer = incTime >= exTime ? inc : ex;
+            const older = incTime >= exTime ? ex : inc;
+            merged.push({
+              ...older,
+              ...newer,
+              regNumber: newer.regNumber || older.regNumber || '',
+              passportDataUrl: newer.passportDataUrl || older.passportDataUrl || '',
+              subjectCombination: newer.subjectCombination || older.subjectCombination || '',
+              courseOfStudy: newer.courseOfStudy || older.courseOfStudy || '',
+              stateOfOrigin: newer.stateOfOrigin || older.stateOfOrigin || '',
+              examCenterId: newer.examCenterId || older.examCenterId,
+              examCenterName: newer.examCenterName || older.examCenterName,
+              updatedAt: Math.max(incTime, exTime, Date.now()),
+            });
+          }
+        }
+
         for (const existing of sharedAppState.candidates) {
           if (existing && existing.id && !incomingMap.has(existing.id)) {
             merged.push(existing);
@@ -369,7 +397,7 @@ async function startServer() {
   app.get('/api/proctoring/feeds', (_req, res) => {
     const now = Date.now();
     const activeList = Array.from(activeCandidateFeeds.values()).filter(
-      (f) => now - f.updatedAt <= 15000
+      (f) => now - f.updatedAt <= 120000
     );
     res.json({
       status: true,
@@ -428,14 +456,17 @@ async function startServer() {
     res.json({ status: true });
   });
 
-  app.post('/api/proctoring/unpublish', (req, res) => {
+  const handleProctoringDisconnect = (req: express.Request, res: express.Response) => {
     const { candidateId } = req.body || {};
     if (candidateId) {
       activeCandidateFeeds.delete(candidateId);
       broadcastSsePayload({ type: 'CANDIDATE_DISCONNECTED', candidateId });
     }
     res.json({ status: true });
-  });
+  };
+
+  app.post('/api/proctoring/unpublish', handleProctoringDisconnect);
+  app.post('/api/proctoring/disconnect', handleProctoringDisconnect);
 
   if (process.env.NODE_ENV !== 'production') {
     const vite = await createViteServer({

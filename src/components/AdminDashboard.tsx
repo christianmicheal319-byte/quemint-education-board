@@ -103,6 +103,7 @@ interface AdminDashboardProps {
   settings: ExamSettings;
   notifications: NotificationItem[];
   onUpdateCandidate: (candidate: Candidate, notifTitle?: string, notifMsg?: string) => void;
+  onUpdateCandidatesBulk?: (candidates: Candidate[], notifTitle?: string, notifMsg?: string) => void;
   onAddCandidatesBulk: (newCandidates: Candidate[]) => void;
   onDeleteCandidates: (ids: string[]) => void;
   onClearAllCandidates: () => void;
@@ -144,6 +145,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
   settings,
   notifications,
   onUpdateCandidate,
+  onUpdateCandidatesBulk,
   onAddCandidatesBulk,
   onDeleteCandidates,
   onClearAllCandidates,
@@ -1534,6 +1536,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
       regNumber: generatedReg,
       paymentStatus: 'Paid',
       examAssigned: true,
+      updatedAt: Date.now(),
     };
     onUpdateCandidate(
       updated,
@@ -1563,6 +1566,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
         pin: '',
         regNumber: generatedReg,
         examAssigned: true,
+        updatedAt: Date.now(),
       };
       onUpdateCandidate(
         updated,
@@ -1582,6 +1586,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
       pin: generatedPin,
       regNumber: generatedReg,
       examAssigned: true,
+      updatedAt: Date.now(),
     };
     onUpdateCandidate(
       updated,
@@ -1601,6 +1606,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
         : candidates.filter(
             (c) =>
               c.paymentStatus !== 'Paid' ||
+              c.examAssigned === false ||
               !c.regNumber ||
               !c.regNumber.trim().toUpperCase().startsWith('QMT')
           )
@@ -1613,6 +1619,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
 
     const workingCandidates = [...candidates];
     const approvedList: Candidate[] = [];
+    const nowTs = Date.now();
 
     candidatesToApprove.forEach((cand) => {
       const existingReg = (cand.regNumber || '').trim().toUpperCase();
@@ -1636,6 +1643,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
         paymentStatus: 'Paid',
         pin: generatedPin,
         examAssigned: true,
+        updatedAt: nowTs,
       };
 
       const idx = workingCandidates.findIndex((item) => item.id === cand.id);
@@ -1648,18 +1656,23 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
       approvedList.push(updatedCand);
     });
 
-    approvedList.forEach((updatedCand, index) => {
-      const isLast = index === approvedList.length - 1;
-      onUpdateCandidate(
-        updatedCand,
-        isLast ? `Bulk Approved ${approvedList.length} Candidate(s)` : undefined,
-        isLast
-          ? `Admin bulk-approved ${approvedList.length} candidate(s) and generated unique QMT Registration Numbers: ${approvedList
-              .map((c) => `${c.firstName} ${c.surname} (${c.regNumber})`)
-              .join(', ')}.`
-          : undefined
-      );
-    });
+    const bulkTitle = `Bulk Approved ${approvedList.length} Candidate(s)`;
+    const bulkMsg = `Admin bulk-approved ${approvedList.length} candidate(s) and generated unique QMT Registration Numbers: ${approvedList
+      .map((c) => `${c.firstName} ${c.surname} (${c.regNumber})`)
+      .join(', ')}.`;
+
+    if (onUpdateCandidatesBulk) {
+      onUpdateCandidatesBulk(approvedList, bulkTitle, bulkMsg);
+    } else {
+      approvedList.forEach((updatedCand, index) => {
+        const isLast = index === approvedList.length - 1;
+        onUpdateCandidate(
+          updatedCand,
+          isLast ? bulkTitle : undefined,
+          isLast ? bulkMsg : undefined
+        );
+      });
+    }
 
     setSelectedIds([]);
     const sampleRegs = approvedList

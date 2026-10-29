@@ -238,12 +238,50 @@ export default function App() {
 
       skipNextServerPushRef.current = true;
       if (Array.isArray(remoteState.candidates) && remoteState.candidates.length > 0) {
-        setCandidates(
-          remoteState.candidates.map((c: Candidate) => ({
-            ...c,
-            passportDataUrl: getCandidateHdPortraitUrl(c),
-          }))
-        );
+        setCandidates((prev) => {
+          const prevMap = new Map(prev.map((c) => [c.id, c]));
+          const remoteMap = new Map(remoteState.candidates.map((c: Candidate) => [c.id, c]));
+          const merged: Candidate[] = [];
+
+          for (const rem of remoteState.candidates as Candidate[]) {
+            if (!rem || !rem.id) continue;
+            const loc = prevMap.get(rem.id);
+            if (!loc) {
+              merged.push({
+                ...rem,
+                passportDataUrl: getCandidateHdPortraitUrl(rem),
+              });
+            } else {
+              const remTime = typeof rem.updatedAt === 'number' ? rem.updatedAt : 0;
+              const locTime = typeof loc.updatedAt === 'number' ? loc.updatedAt : 0;
+              const newer = remTime >= locTime ? rem : loc;
+              const older = remTime >= locTime ? loc : rem;
+              const combined: Candidate = {
+                ...older,
+                ...newer,
+                regNumber: newer.regNumber || older.regNumber || '',
+                passportDataUrl: getCandidateHdPortraitUrl(
+                  newer.passportDataUrl ? newer : older
+                ),
+                subjectCombination:
+                  newer.subjectCombination || older.subjectCombination || '',
+                courseOfStudy: newer.courseOfStudy || older.courseOfStudy || '',
+                stateOfOrigin: newer.stateOfOrigin || older.stateOfOrigin || '',
+                examCenterId: newer.examCenterId || older.examCenterId,
+                examCenterName: newer.examCenterName || older.examCenterName,
+                updatedAt: Math.max(remTime, locTime),
+              };
+              merged.push(combined);
+            }
+          }
+
+          for (const loc of prev) {
+            if (loc && loc.id && !remoteMap.has(loc.id)) {
+              merged.push(loc);
+            }
+          }
+          return merged;
+        });
       }
       if (Array.isArray(remoteState.questions)) {
         setQuestions(remoteState.questions);
@@ -291,11 +329,31 @@ export default function App() {
     };
 
     syncFromServer(true);
-    const pollTimer = setInterval(() => syncFromServer(false), 2500);
+    const pollTimer = setInterval(() => syncFromServer(false), 2000);
+
+    let eventSource: EventSource | null = null;
+    try {
+      eventSource = new EventSource('/api/proctoring/stream');
+      eventSource.onmessage = (ev) => {
+        try {
+          const payload = JSON.parse(ev.data);
+          if (payload?.type === 'APP_STATE_SYNC' && payload.state) {
+            applyRemoteState(payload.state);
+          }
+        } catch {
+          // ignore
+        }
+      };
+    } catch {
+      // ignore SSE fallback to polling
+    }
 
     return () => {
       isMounted = false;
       clearInterval(pollTimer);
+      if (eventSource) {
+        eventSource.close();
+      }
     };
   }, []);
 
@@ -531,71 +589,128 @@ export default function App() {
     eventTitle?: string,
     eventMsg?: string
   ) => {
+    const stampedCand: Candidate = {
+      ...cand,
+      updatedAt: cand.updatedAt || Date.now(),
+    };
     setCandidates((prev) => {
-      const exists = prev.some((c) => c.id === cand.id);
+      const exists = prev.some((c) => c.id === stampedCand.id);
       if (exists) {
-        return prev.map((c) => (c.id === cand.id ? cand : c));
+        return prev.map((c) => (c.id === stampedCand.id ? stampedCand : c));
       }
-      return [cand, ...prev];
+      return [stampedCand, ...prev];
     });
     setResults((prev) => {
       const hasMatch = prev.some(
         (r) =>
-          r.candidateId === cand.id ||
-          (cand.regNumber &&
-            r.regNumber.trim().toUpperCase() === cand.regNumber.trim().toUpperCase())
+          r.candidateId === stampedCand.id ||
+          (stampedCand.regNumber &&
+            r.regNumber.trim().toUpperCase() === stampedCand.regNumber.trim().toUpperCase())
       );
       if (!hasMatch) return prev;
       return prev.map((r) =>
-        r.candidateId === cand.id ||
-        (cand.regNumber &&
-          r.regNumber.trim().toUpperCase() === cand.regNumber.trim().toUpperCase())
+        r.candidateId === stampedCand.id ||
+        (stampedCand.regNumber &&
+          r.regNumber.trim().toUpperCase() === stampedCand.regNumber.trim().toUpperCase())
           ? {
               ...r,
-              category: cand.category,
-              gender: cand.gender,
-              courseOfStudy: cand.courseOfStudy || r.courseOfStudy,
-              stateOfOrigin: cand.stateOfOrigin || r.stateOfOrigin,
-              examCenterName: cand.examCenterName || r.examCenterName,
-              regNumber: cand.regNumber || r.regNumber,
-              candidateName: `${cand.firstName} ${
-                cand.middleName ? cand.middleName + ' ' : ''
-              }${cand.surname}`.trim(),
+              category: stampedCand.category,
+              gender: stampedCand.gender,
+              courseOfStudy: stampedCand.courseOfStudy || r.courseOfStudy,
+              stateOfOrigin: stampedCand.stateOfOrigin || r.stateOfOrigin,
+              examCenterName: stampedCand.examCenterName || r.examCenterName,
+              regNumber: stampedCand.regNumber || r.regNumber,
+              candidateName: `${stampedCand.firstName} ${
+                stampedCand.middleName ? stampedCand.middleName + ' ' : ''
+              }${stampedCand.surname}`.trim(),
             }
           : r
       );
     });
     if (eventTitle && eventMsg) {
-      addNotification(eventTitle, eventMsg, cand.pin ? 'pin' : 'payment');
+      addNotification(eventTitle, eventMsg, stampedCand.pin ? 'pin' : 'payment');
     }
   };
 
-  const handleStartExamLogin = (e: React.FormEvent) => {
-    e.preventDefault();
+  const handleUpdateCandidatesBulk = (
+    updatedList: Candidate[],
+    eventTitle?: string,
+    eventMsg?: string
+  ) => {
+    const nowTs = Date.now();
+    const updatedMap = new Map(
+      updatedList.map((c) => [c.id, { ...c, updatedAt: c.updatedAt || nowTs }])
+    );
+    setCandidates((prev) => {
+      const next = prev.map((c) => updatedMap.get(c.id) || c);
+      for (const item of updatedMap.values()) {
+        if (!next.some((c) => c.id === item.id)) {
+          next.unshift(item);
+        }
+      }
+      return next;
+    });
+    if (eventTitle && eventMsg) {
+      addNotification(eventTitle, eventMsg, 'registration');
+    }
+  };
+
+  const verifyAndAttemptCandidateLogin = async (rawRegNo: string) => {
     setLoginError('');
     if (!settings.examOpen) {
       setLoginError('Examination portal is currently closed by the Quemint Education Board.');
       return;
     }
 
-    const cleanReg = regInput.trim().toUpperCase();
+    const cleanReg = rawRegNo.trim().toUpperCase();
     if (!cleanReg) {
       setLoginError('Please enter your Registration Number to continue.');
       return;
     }
 
-    const found = candidates.find((c) => {
-      const fullNameUpper = `${c.firstName} ${c.middleName ? c.middleName + ' ' : ''}${c.surname}`
-        .trim()
-        .toUpperCase();
-      const shortNameUpper = `${c.firstName} ${c.surname}`.trim().toUpperCase();
-      return (
-        c.regNumber.toUpperCase() === cleanReg ||
-        (c.pin && c.pin.toUpperCase() === cleanReg) ||
-        fullNameUpper === cleanReg ||
-        shortNameUpper === cleanReg
-      );
-    });
+    const findMatchingCandidate = (list: Candidate[]): Candidate | undefined =>
+      list.find((c) => {
+        const fullNameUpper = `${c.firstName} ${c.middleName ? c.middleName + ' ' : ''}${c.surname}`
+          .trim()
+          .toUpperCase();
+        const shortNameUpper = `${c.firstName} ${c.surname}`.trim().toUpperCase();
+        return (
+          (c.regNumber && c.regNumber.trim().toUpperCase() === cleanReg) ||
+          (c.pin && c.pin.trim().toUpperCase() === cleanReg) ||
+          fullNameUpper === cleanReg ||
+          shortNameUpper === cleanReg
+        );
+      });
+
+    let found = findMatchingCandidate(candidates);
+
+    // Always check latest server state if candidate is not found or not yet approved locally
+    if (!found || found.paymentStatus !== 'Paid' || found.examAssigned === false) {
+      try {
+        const res = await fetch('/api/sync');
+        if (res.ok) {
+          const data = await res.json();
+          const remoteCands: Candidate[] | undefined = data?.state?.candidates;
+          if (Array.isArray(remoteCands) && remoteCands.length > 0) {
+            const remoteFound = findMatchingCandidate(remoteCands);
+            if (remoteFound) {
+              found = {
+                ...remoteFound,
+                passportDataUrl: getCandidateHdPortraitUrl(remoteFound),
+              };
+              setCandidates(
+                remoteCands.map((c) => ({
+                  ...c,
+                  passportDataUrl: getCandidateHdPortraitUrl(c),
+                }))
+              );
+            }
+          }
+        }
+      } catch {
+        // fallback to local candidates state
+      }
+    }
 
     if (!found) {
       setLoginError(
@@ -612,20 +727,19 @@ export default function App() {
     }
 
     if (found.paymentStatus !== 'Paid' || found.examAssigned === false) {
-      const isFree =
-        Boolean(settings.freeRegistration || settings.registrationFee === 0) ||
-        found.paymentMethod === 'Free Registration' ||
-        found.amountPaid === 0;
       setLoginError(
-        isFree
-          ? `Your Registration Number (${found.regNumber}) is awaiting Admin Approval. Please wait for the Administrator to approve your registration in the Admin Panel before logging in.`
-          : 'Your registration payment is still Pending Admin Confirmation. Once confirmed in the Admin Panel, your Registration Number and PIN will be activated.'
+        'Registration Number not yet approved, contact the admin or retry'
       );
       return;
     }
 
     // Open TASK 2 Password Pop-up ("Verify Identity") before starting exam
     setPendingVerifyCandidate(found);
+  };
+
+  const handleStartExamLogin = (e: React.FormEvent) => {
+    e.preventDefault();
+    verifyAndAttemptCandidateLogin(regInput);
   };
 
   const handleCheckResultSubmit = (e: React.FormEvent) => {
@@ -738,8 +852,9 @@ export default function App() {
             activeCandidateId={activeRegCandidateId}
             onSetActiveCandidateId={setActiveRegCandidateId}
             onRegisterOrUpdateCandidate={handleRegisterOrUpdateCandidate}
-            onBackToLogin={() => {
-              setRegInput('');
+            onBackToLogin={(prefillReg) => {
+              setRegInput(prefillReg || '');
+              setLoginError('');
               setView('login');
             }}
             onOpenAdminForConfirmation={requestAdminAccess}
@@ -930,8 +1045,11 @@ export default function App() {
         settings={settings}
         notifications={notifications}
         onUpdateCandidate={handleRegisterOrUpdateCandidate}
+        onUpdateCandidatesBulk={handleUpdateCandidatesBulk}
         onAddCandidatesBulk={(newCands) => {
-          setCandidates((prev) => [...newCands, ...prev]);
+          const nowTs = Date.now();
+          const stamped = newCands.map((c) => ({ ...c, updatedAt: c.updatedAt || nowTs }));
+          setCandidates((prev) => [...stamped, ...prev]);
           addNotification(
             'Bulk Candidates Uploaded',
             `${newCands.length} candidate(s) added to Uploaded Candidates Dashboard.`,
@@ -939,9 +1057,24 @@ export default function App() {
           );
         }}
         onDeleteCandidates={(ids) => {
-          setCandidates((prev) => prev.filter((c) => !ids.includes(c.id)));
+          setCandidates((prev) => {
+            const next = prev.filter((c) => !ids.includes(c.id));
+            fetch('/api/sync', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ candidates: next, replaceCandidates: true }),
+            }).catch(() => {});
+            return next;
+          });
         }}
-        onClearAllCandidates={() => setCandidates([])}
+        onClearAllCandidates={() => {
+          setCandidates([]);
+          fetch('/api/sync', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ candidates: [], replaceCandidates: true }),
+          }).catch(() => {});
+        }}
         onAddQuestion={(q) => setQuestions((prev) => [q, ...prev])}
         onAddQuestionsBulk={(newQs) =>
           setQuestions((prev) => [...newQs, ...prev])
@@ -1629,9 +1762,22 @@ export default function App() {
               </div>
 
               {loginError && (
-                <div className="p-3.5 rounded-xl bg-red-50 border border-red-200 text-red-800 text-xs font-semibold flex items-start gap-2">
-                  <AlertCircle className="w-4 h-4 shrink-0 mt-0.5 text-red-600" />
-                  <span>{loginError}</span>
+                <div className="p-3.5 rounded-xl bg-red-50 border border-red-200 text-red-800 text-xs font-semibold flex flex-col gap-2">
+                  <div className="flex items-start gap-2">
+                    <AlertCircle className="w-4 h-4 shrink-0 mt-0.5 text-red-600" />
+                    <span>{loginError}</span>
+                  </div>
+                  {loginError.toLowerCase().includes('not yet approved') && (
+                    <div className="flex items-center justify-end gap-2 pt-1">
+                      <button
+                        type="button"
+                        onClick={() => verifyAndAttemptCandidateLogin(regInput)}
+                        className="px-3 py-1.5 rounded-lg bg-[#0a6b3c] hover:bg-[#0e8a4e] text-white text-[11px] font-extrabold uppercase tracking-wider transition-colors cursor-pointer"
+                      >
+                        Retry Now
+                      </button>
+                    </div>
+                  )}
                 </div>
               )}
 

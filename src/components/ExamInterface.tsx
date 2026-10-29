@@ -83,6 +83,24 @@ function shuffleQuestionOptions(q: Question): Question {
   };
 }
 
+// Normalize subject names so aliases like "English" / "English Language", "Literature" / "Literature in English", "Maths" / "Mathematics", "Accounting" / "Financial Accounting" match seamlessly
+function normalizeSubjectKey(raw: string): string {
+  const s = (raw || '').trim().toLowerCase();
+  if (s === 'english' || s === 'english language' || s === 'use of english') return 'english';
+  if (s === 'maths' || s === 'math' || s === 'mathematics') return 'mathematics';
+  if (s === 'literature' || s === 'literature in english' || s === 'lit in english') return 'literature';
+  if (s === 'accounting' || s === 'financial accounting' || s === 'principles of accounts') return 'accounting';
+  if (s === 'crs' || s === 'crk' || s === 'christian religious studies' || s === 'christian religious knowledge') return 'crs';
+  if (s === 'agric' || s === 'agricultural science' || s === 'agriculture') return 'agric';
+  if (s === 'civic' || s === 'civic education') return 'civic';
+  return s;
+}
+
+function subjectsMatch(subjA: string, subjB: string): boolean {
+  if (!subjA || !subjB) return false;
+  return normalizeSubjectKey(subjA) === normalizeSubjectKey(subjB);
+}
+
 export const ExamInterface: React.FC<ExamInterfaceProps> = ({
   candidate,
   questions,
@@ -116,19 +134,12 @@ export const ExamInterface: React.FC<ExamInterfaceProps> = ({
     );
   }, [settings.subjectCombinations, candidate.category]);
 
-  // Flexible subject combination: prioritize candidate.subjectCombination (e.g. "English, Maths, Biology, Chemistry")
-  // over any fixed category subjects so categories are never locked to specific subjects.
+  // Strictly prioritize candidate.subjectCombination (the exact subjects selected by the candidate during registration)
   const allowedCandidateSubjects = useMemo<string[]>(() => {
     if (candidate.subjectCombination && candidate.subjectCombination.trim().length > 0) {
       const parsed = candidate.subjectCombination
         .split(',')
-        .map((s) => {
-          const clean = s.trim();
-          if (clean.toLowerCase() === 'maths' || clean.toLowerCase() === 'math') {
-            return 'Mathematics';
-          }
-          return clean;
-        })
+        .map((s) => s.trim())
         .filter(Boolean);
       if (parsed.length > 0) {
         return parsed;
@@ -140,34 +151,32 @@ export const ExamInterface: React.FC<ExamInterfaceProps> = ({
     return [];
   }, [candidate.subjectCombination, candidateCombination]);
 
-  // Helper: get the exact (subject, questionCount) entries for a test filtered strictly to the candidate's Subject Combination
+  // Helper: get the exact (subject, questionCount) entries for a test filtered strictly to the candidate's selected subjects
   const getCandidateSubjectsForTest = useCallback(
     (test: PublishedTest): [string, number][] => {
       const rawAllocEntries = Object.entries(test.subjectAllocations || {}).filter(
         ([_, cnt]) => cnt > 0
       );
 
-      // If the candidate belongs to a configured Subject Combination (Category), strictly include all subjects in their Subject Combination
+      // Strictly include ONLY the subjects the candidate selected during registration
       if (allowedCandidateSubjects.length > 0) {
         const result: [string, number][] = [];
         allowedCandidateSubjects.forEach((comboSubj) => {
-          // Check if the test has an explicit allocation for this subject
-          const matchedAlloc = rawAllocEntries.find(
-            ([allocSubj]) => allocSubj.trim().toLowerCase() === comboSubj.trim().toLowerCase()
+          const matchedAlloc = rawAllocEntries.find(([allocSubj]) =>
+            subjectsMatch(allocSubj, comboSubj)
           );
           if (matchedAlloc && matchedAlloc[1] > 0) {
             result.push([comboSubj, matchedAlloc[1]]);
           } else {
-            // Fallback to subjectPooling total or available question count for this combination subject
-            const poolCfg = (settings.subjectPooling || []).find(
-              (sp) => sp.subject.trim().toLowerCase() === comboSubj.trim().toLowerCase()
+            const poolCfg = (settings.subjectPooling || []).find((sp) =>
+              subjectsMatch(sp.subject, comboSubj)
             );
-            const availInBank = questions.filter(
-              (q) => q.subject.trim().toLowerCase() === comboSubj.trim().toLowerCase()
+            const availInBank = questions.filter((q) =>
+              subjectsMatch(q.subject, comboSubj)
             ).length;
             const fallbackCount =
-              poolCfg && poolCfg.subjectTotal > 0
-                ? poolCfg.subjectTotal
+              poolCfg && (poolCfg.subjectTotal || poolCfg.poolSize)
+                ? (poolCfg.subjectTotal || poolCfg.poolSize || 10)
                 : availInBank > 0
                 ? Math.min(10, availInBank)
                 : 5;
@@ -182,7 +191,7 @@ export const ExamInterface: React.FC<ExamInterfaceProps> = ({
     [allowedCandidateSubjects, settings.subjectPooling, questions]
   );
 
-  // All published tests visible to this candidate's Subject Combination (Category)
+  // All published tests visible to this candidate
   const availablePublishedTests = useMemo<PublishedTest[]>(() => {
     const list = (settings.publishedTests || []).filter((t) => {
       if (!t.published) return false;
@@ -190,7 +199,6 @@ export const ExamInterface: React.FC<ExamInterfaceProps> = ({
         t.category === 'All' ||
         t.category.trim().toLowerCase() === candidate.category.trim().toLowerCase();
       if (!matchesCat) return false;
-      // Also ensure the test has at least 1 subject from the candidate's Subject Combination
       if (allowedCandidateSubjects.length > 0) {
         const subjForCand = getCandidateSubjectsForTest(t);
         return subjForCand.length > 0;
@@ -199,12 +207,12 @@ export const ExamInterface: React.FC<ExamInterfaceProps> = ({
     });
     if (list.length > 0) return list;
 
-    // Fallback default Rapid Test tailored to the candidate's Subject Combination
+    // Fallback default Rapid Test tailored strictly to the candidate's selected subjects
     const fallbackAllocations: Record<string, number> = {};
     const targetSubjs =
       allowedCandidateSubjects.length > 0
         ? allowedCandidateSubjects
-        : ['English', 'Biology', 'Chemistry', 'Physics'];
+        : ['English Language', 'Biology', 'Chemistry', 'Physics'];
     let totalFallback = 0;
     targetSubjs.forEach((s) => {
       fallbackAllocations[s] = 10;
@@ -241,48 +249,54 @@ export const ExamInterface: React.FC<ExamInterfaceProps> = ({
     () => availablePublishedTests[0]
   );
 
-  // Build pooled & shuffled question set for a specific published test, strictly restricted to the candidate's Subject Combination
+  // Build pooled & shuffled question set for a specific published test, strictly restricted to the candidate's selected subjects
   const buildPooledQuestionsForTest = useCallback(
     (test: PublishedTest): Question[] => {
       const candidateSubjEntries = getCandidateSubjectsForTest(test);
 
-      // Determine which subjects to include for this candidate
+      // Strictly restrict to the candidate's selected subjects
       const candidateSubjects =
-        candidateSubjEntries.length > 0
-          ? candidateSubjEntries.map(([subj, count]) => ({ subject: subj, count }))
-          : allowedCandidateSubjects.map((subj) => ({
-              subject: subj,
-              count: questions.filter(
-                (q) => q.subject.trim().toLowerCase() === subj.trim().toLowerCase()
-              ).length,
-            }));
+        allowedCandidateSubjects.length > 0
+          ? allowedCandidateSubjects.map((subj) => {
+              const matchedEntry = candidateSubjEntries.find(([s]) =>
+                subjectsMatch(s, subj)
+              );
+              const availCount = questions.filter((q) =>
+                subjectsMatch(q.subject, subj)
+              ).length;
+              return {
+                subject: subj,
+                count: matchedEntry ? matchedEntry[1] : Math.max(1, availCount),
+              };
+            })
+          : candidateSubjEntries.map(([subj, count]) => ({ subject: subj, count }));
 
       const finalPooled: Question[] = [];
 
       candidateSubjects.forEach(({ subject, count }) => {
-        // All questions in the Question Bank for this subject
-        const allSubjectQs = questions.filter(
-          (q) => q.subject.trim().toLowerCase() === subject.trim().toLowerCase()
+        // Only pull questions from the Question Bank that match this candidate's selected subject
+        const allSubjectQs = questions.filter((q) =>
+          subjectsMatch(q.subject, subject)
         );
         if (allSubjectQs.length === 0) return;
 
-        // Prefer questions matching candidate's category or 'All', but allow any question in this assigned subject if needed
+        // Prefer questions matching candidate's category or 'All', but allow any question in this selected subject if needed
         const categoryMatchedQs = allSubjectQs.filter(
           (q) =>
+            !q.category ||
             q.category === 'All' ||
             q.category.trim().toLowerCase() === candidate.category.trim().toLowerCase()
         );
         const subjectQs =
           categoryMatchedQs.length >= count ? categoryMatchedQs : allSubjectQs;
 
-        const poolCfg = (settings.subjectPooling || []).find(
-          (sp) => sp.subject.trim().toLowerCase() === subject.trim().toLowerCase()
+        const poolCfg = (settings.subjectPooling || []).find((sp) =>
+          subjectsMatch(sp.subject, subject)
         );
 
         let pickedForSubject: Question[] = [];
 
-        if (poolCfg && poolCfg.banks.some((b) => b.enabled && b.pick > 0)) {
-          // Pick from each configured bank, shuffled
+        if (poolCfg && Array.isArray(poolCfg.banks) && poolCfg.banks.some((b) => b.enabled && b.pick > 0)) {
           poolCfg.banks.forEach((bank) => {
             if (!bank.enabled || bank.pick <= 0) return;
             const bankMatches = subjectQs.filter(
@@ -292,7 +306,6 @@ export const ExamInterface: React.FC<ExamInterfaceProps> = ({
             pickedForSubject.push(...shuffledBank.slice(0, bank.pick));
           });
 
-          // If bank tags didn't fill the requested count, top up from remaining subject questions
           if (pickedForSubject.length < count) {
             const usedIds = new Set(pickedForSubject.map((q) => q.id));
             const remaining = shuffleArray(
@@ -306,9 +319,12 @@ export const ExamInterface: React.FC<ExamInterfaceProps> = ({
           pickedForSubject = shuffleArray(subjectQs).slice(0, count);
         }
 
-        // Shuffle the combined questions for this subject and shuffle options (A-D)
+        // Tag each picked question with the candidate's exact selected subject label and shuffle options (A-D)
         const shuffledSubjectSet = shuffleArray(pickedForSubject).map((q) =>
-          shuffleQuestionOptions(q)
+          shuffleQuestionOptions({
+            ...q,
+            subject,
+          })
         );
         finalPooled.push(...shuffledSubjectSet);
       });
@@ -541,107 +557,6 @@ export const ExamInterface: React.FC<ExamInterfaceProps> = ({
     }
   };
 
-  useEffect(() => {
-    if (settings.proctoringEnabled === false) {
-      if (liveCameraStream) {
-        liveCameraStream.getTracks().forEach((t) => t.stop());
-        setLiveCameraStream(null);
-      }
-      return;
-    }
-
-    let isMounted = true;
-    let acquiredStream: MediaStream | null = null;
-
-    if (typeof navigator !== 'undefined' && navigator.mediaDevices?.getUserMedia) {
-      navigator.mediaDevices
-        .getUserMedia({
-          video: {
-            width: { ideal: 1920, min: 1280 },
-            height: { ideal: 1080, min: 720 },
-            frameRate: { ideal: 30 },
-            facingMode: 'user',
-          },
-          audio: false, // Strictly live video only, no audio or recording saved
-        })
-        .then((stream) => {
-          if (!isMounted) {
-            stream.getTracks().forEach((t) => t.stop());
-            return;
-          }
-          acquiredStream = stream;
-          setLiveCameraStream(stream);
-        })
-        .catch(() => {
-          // Fallback to standard HD or any available user camera if 1080p hardware constraint is not supported
-          navigator.mediaDevices
-            .getUserMedia({
-              video: { width: { ideal: 1280 }, height: { ideal: 720 }, facingMode: 'user' },
-              audio: false,
-            })
-            .then((stream) => {
-              if (!isMounted) {
-                stream.getTracks().forEach((t) => t.stop());
-                return;
-              }
-              acquiredStream = stream;
-              setLiveCameraStream(stream);
-            })
-            .catch(() => {
-              navigator.mediaDevices
-                .getUserMedia({ video: true, audio: false })
-                .then((stream) => {
-                  if (!isMounted) {
-                    stream.getTracks().forEach((t) => t.stop());
-                    return;
-                  }
-                  acquiredStream = stream;
-                  setLiveCameraStream(stream);
-                })
-                .catch(() => {});
-            });
-        });
-    }
-
-    return () => {
-      isMounted = false;
-      if (acquiredStream) {
-        acquiredStream.getTracks().forEach((t) => t.stop());
-      }
-    };
-  }, [settings.proctoringEnabled]);
-
-  // Immediately unpublish live stream when candidate leaves ExamInterface
-  useEffect(() => {
-    return () => {
-      unpublishCandidateLiveStream(candidate.id);
-    };
-  }, [candidate.id]);
-
-  useEffect(() => {
-    if (floatingVideoRef.current && liveCameraStream) {
-      if (floatingVideoRef.current.srcObject !== liveCameraStream) {
-        floatingVideoRef.current.srcObject = liveCameraStream;
-      }
-      floatingVideoRef.current.play().catch(() => {});
-    }
-    if (floatingCanvasRef.current && liveCameraStream) {
-      // unused canvas ref kept for compatibility
-    }
-  }, [liveCameraStream, stage]);
-
-  const attachLiveStreamRef = useCallback(
-    (el: HTMLVideoElement | null) => {
-      if (el && liveCameraStream) {
-        if (el.srcObject !== liveCameraStream) {
-          el.srcObject = liveCameraStream;
-        }
-        el.play().catch(() => {});
-      }
-    },
-    [liveCameraStream]
-  );
-
   const candidatePortraitUrl = useMemo(
     () => getCandidateHdPortraitUrl(candidate),
     [candidate]
@@ -660,38 +575,18 @@ export const ExamInterface: React.FC<ExamInterfaceProps> = ({
           top: `${camCirclePos.y}px`,
           touchAction: 'none',
         }}
-        title="Live Proctoring Camera (Drag to move anywhere on screen • No recording saved)"
-        className="fixed z-50 w-24 h-24 rounded-full border-3 border-[#0a6b3c] bg-neutral-950 shadow-xl overflow-hidden cursor-grab active:cursor-grabbing select-none ring-4 ring-white/80"
+        title="Live Proctoring Active (Admin is monitoring your exam session)"
+        className="fixed z-50 px-3 py-1.5 rounded-full border-2 border-[#0a6b3c] bg-neutral-950/90 text-white shadow-lg cursor-grab active:cursor-grabbing select-none flex items-center gap-2"
       >
-        {liveCameraStream ? (
-          <video
-            ref={floatingVideoRef}
-            autoPlay
-            playsInline
-            muted
-            className="w-full h-full object-cover transform -scale-x-100 pointer-events-none"
-          />
-        ) : candidatePortraitUrl ? (
-          <img
-            src={candidatePortraitUrl}
-            alt={`${candidate.firstName} ${candidate.surname}`}
-            className="w-full h-full object-cover pointer-events-none"
-          />
-        ) : (
-          <div className="w-full h-full bg-neutral-950 pointer-events-none" />
-        )}
-        {/* Tiny Live Dot & Label at bottom of circle */}
-        <div className="absolute bottom-1.5 inset-x-0 flex items-center justify-center pointer-events-none">
-          <span className="px-2 py-0.5 rounded-full bg-black/75 text-white text-[8px] font-extrabold uppercase tracking-wider flex items-center gap-1">
-            <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
-            <span>LIVE</span>
-          </span>
-        </div>
+        <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse shrink-0" />
+        <span className="text-[10px] font-extrabold uppercase tracking-wider whitespace-nowrap">
+          Admin Proctoring Live
+        </span>
       </div>
     );
   };
 
-  // Build real-time candidate telemetry snapshot
+  // Build real-time candidate telemetry snapshot for Admin Live Proctoring
   const currentLiveTelemetry = useMemo<LiveCandidateTelemetry>(() => {
     const answeredIds = Object.keys(answers);
     const totalAnswered = answeredIds.length;
@@ -706,6 +601,13 @@ export const ExamInterface: React.FC<ExamInterfaceProps> = ({
     const liveAccuracy =
       totalAnswered > 0 ? Math.round((totalCorrect / totalAnswered) * 100) : 0;
 
+    const selectedIdx =
+      currentQuestion && answers[currentQuestion.id] !== undefined
+        ? answers[currentQuestion.id]
+        : undefined;
+    const selectedLetter =
+      selectedIdx !== undefined ? ['A', 'B', 'C', 'D'][selectedIdx] : undefined;
+
     return {
       candidateId: candidate.id,
       regNumber: candidate.regNumber,
@@ -717,12 +619,14 @@ export const ExamInterface: React.FC<ExamInterfaceProps> = ({
       testCode: selectedTest?.testCode || 'RAPID-2026-QMT',
       currentSubject: activeSubject,
       currentQuestionIndex: subjQuestionIndex + 1,
+      currentQuestionText: currentQuestion?.questionText || '',
+      selectedOptionLetter: selectedLetter,
       totalQuestions: examQuestions.length,
       answeredCount: totalAnswered,
       correctCount: totalCorrect,
       accuracyPercent: liveAccuracy,
       focusStatus: lostFocusWarning ? 'Lost Focus Warning' : 'Focused',
-      cameraActive: settings.proctoringEnabled !== false && Boolean(liveCameraStream),
+      cameraActive: settings.proctoringEnabled !== false,
       isLiveFromExamTab: true,
       examStage: stage,
       timeLeftSeconds: secondsLeft,
@@ -732,6 +636,7 @@ export const ExamInterface: React.FC<ExamInterfaceProps> = ({
   }, [
     answers,
     examQuestions,
+    currentQuestion,
     candidate,
     candidatePortraitUrl,
     selectedTest,
@@ -739,7 +644,6 @@ export const ExamInterface: React.FC<ExamInterfaceProps> = ({
     subjQuestionIndex,
     lostFocusWarning,
     settings.proctoringEnabled,
-    liveCameraStream,
     stage,
     secondsLeft,
   ]);
@@ -759,67 +663,26 @@ export const ExamInterface: React.FC<ExamInterfaceProps> = ({
     subjQuestionIndex,
     lostFocusWarning,
     settings.proctoringEnabled,
-    Boolean(liveCameraStream),
   ]);
 
-  // Relay real-time HD webcam frames & heartbeat telemetry to Admin Live Proctoring (Cross-Tab + Cross-Device)
+  // Relay heartbeat telemetry to Admin Live Proctoring every second while exam is open
   useEffect(() => {
     if (settings.proctoringEnabled === false) return;
 
-    const captureCanvas = document.createElement('canvas');
-    captureCanvas.width = 960;
-    captureCanvas.height = 540;
-    const ctx = captureCanvas.getContext('2d');
-
-    // Dedicated offscreen video element so stage transitions never interrupt live frame streaming
-    const captureVideoEl = document.createElement('video');
-    captureVideoEl.muted = true;
-    captureVideoEl.playsInline = true;
-    captureVideoEl.autoplay = true;
-
-    if (liveCameraStream) {
-      captureVideoEl.srcObject = liveCameraStream;
-      captureVideoEl.play().catch(() => {});
-    }
-
-    const frameInterval = setInterval(() => {
-      const activeVideo =
-        captureVideoEl.readyState >= 2
-          ? captureVideoEl
-          : floatingVideoRef.current && floatingVideoRef.current.readyState >= 2
-          ? floatingVideoRef.current
-          : null;
-
+    const telemetryInterval = setInterval(() => {
       const latestTel: LiveCandidateTelemetry = {
         ...latestTelemetryRef.current,
+        cameraActive: true,
+        isLiveFromExamTab: true,
         lastUpdated: Date.now(),
       };
-
-      if (activeVideo && ctx && liveCameraStream) {
-        try {
-          ctx.save();
-          // Mirror horizontally to match natural front-camera orientation
-          ctx.translate(captureCanvas.width, 0);
-          ctx.scale(-1, 1);
-          ctx.drawImage(activeVideo, 0, 0, captureCanvas.width, captureCanvas.height);
-          ctx.restore();
-          const liveFrameDataUrl = captureCanvas.toDataURL('image/jpeg', 0.84);
-          publishCandidateLiveFrame(candidate.id, liveFrameDataUrl, latestTel);
-          return;
-        } catch {
-          // Fall through to telemetry heartbeat
-        }
-      }
-
-      // Heartbeat telemetry if hardware camera is still warming up or unavailable
       publishCandidateLiveTelemetry(latestTel);
-    }, 260);
+    }, 1000);
 
     return () => {
-      clearInterval(frameInterval);
-      captureVideoEl.srcObject = null;
+      clearInterval(telemetryInterval);
     };
-  }, [liveCameraStream, settings.proctoringEnabled, candidate.id]);
+  }, [settings.proctoringEnabled, candidate.id]);
 
   const handleSelectOption = (optionIndex: number) => {
     if (!currentQuestion) return;
@@ -1502,7 +1365,7 @@ export const ExamInterface: React.FC<ExamInterfaceProps> = ({
                 </div>
               </div>
 
-              {/* JAMB CBT Biometric & Live Camera Verification Box */}
+              {/* JAMB CBT Biometric Verification Box */}
               {settings.proctoringEnabled !== false && (
                 <div className="rounded-2xl border-2 border-[#0a6b3c] bg-[#0a6b3c]/5 p-4 space-y-3.5">
                   <div className="flex items-start gap-3">
@@ -1511,57 +1374,40 @@ export const ExamInterface: React.FC<ExamInterfaceProps> = ({
                     </div>
                     <div>
                       <div className="text-xs font-extrabold uppercase tracking-wider text-[#0a6b3c]">
-                        JAMB CBT BIOMETRIC &amp; LIVE CCTV VERIFICATION
+                        JAMB CBT BIOMETRIC &amp; ADMIN INVIGILATION
                       </div>
                       <p className="text-xs text-neutral-700 leading-relaxed mt-1">
-                        Your live webcam is streaming to the CBT Proctoring Console (zero video recording is saved). During the exam, your camera stays in a small movable circle.
+                        Your examination workstation is connected to the Admin Live Proctoring Console so invigilators can monitor your test session in real time.
                       </p>
                     </div>
                   </div>
 
-                  {/* Side-by-side Registered Biometric Photo + Live Webcam Stream */}
-                  <div className="grid grid-cols-2 gap-3 bg-neutral-950 p-3 rounded-xl border border-neutral-800 text-white">
-                    <div className="space-y-1.5">
-                      <div className="text-[10px] font-mono font-extrabold uppercase text-emerald-400">
-                        REGISTERED PHOTO
-                      </div>
-                      <div className="aspect-video rounded-lg overflow-hidden border border-neutral-700 bg-white">
-                        {candidatePortraitUrl ? (
-                          <img
-                            src={candidatePortraitUrl}
-                            alt={candidate.firstName}
-                            className="w-full h-full object-cover"
-                          />
-                        ) : null}
-                      </div>
+                  <div className="flex items-center gap-3.5 bg-neutral-950 p-3 rounded-xl border border-neutral-800 text-white">
+                    <div className="w-14 h-16 rounded-lg overflow-hidden border border-emerald-500 bg-white shrink-0">
+                      {candidatePortraitUrl ? (
+                        <img
+                          src={candidatePortraitUrl}
+                          alt={candidate.firstName}
+                          className="w-full h-full object-cover"
+                        />
+                      ) : null}
                     </div>
-
-                    <div className="space-y-1.5">
-                      <div className="text-[10px] font-mono font-extrabold uppercase text-red-400 flex items-center gap-1">
-                        <span className="w-1.5 h-1.5 rounded-full bg-red-500 animate-ping" />
-                        <span>LIVE CBT WEBCAM</span>
+                    <div className="space-y-1 text-xs">
+                      <div className="text-[10px] font-mono font-extrabold uppercase text-emerald-400">
+                        VERIFIED CANDIDATE IDENTITY
                       </div>
-                      <div className="aspect-video rounded-lg overflow-hidden border border-emerald-500/60 bg-neutral-900 flex items-center justify-center">
-                        {liveCameraStream ? (
-                          <video
-                            ref={attachLiveStreamRef}
-                            autoPlay
-                            playsInline
-                            muted
-                            className="w-full h-full object-cover transform -scale-x-100"
-                          />
-                        ) : (
-                          <span className="text-[10px] font-mono text-neutral-400 px-2 text-center">
-                            Initializing Webcam...
-                          </span>
-                        )}
+                      <div className="font-extrabold text-white">
+                        {candidate.firstName} {candidate.surname} ({candidate.regNumber})
+                      </div>
+                      <div className="text-[11px] text-neutral-400">
+                        Category: {candidate.category} • Connected to Admin Invigilation
                       </div>
                     </div>
                   </div>
 
                   <div className="w-full py-2.5 px-4 rounded-xl bg-[#0a6b3c] text-white text-xs font-extrabold flex items-center justify-center gap-1.5 shadow-xs">
                     <Check className="w-4 h-4 stroke-[2.5]" />
-                    <span>JAMB CBT Live Stream Active (No Recording Saved)</span>
+                    <span>Connected to Admin Live Invigilation</span>
                   </div>
                 </div>
               )}
@@ -2021,7 +1867,7 @@ export const ExamInterface: React.FC<ExamInterfaceProps> = ({
             </div>
 
             <div className="p-5 space-y-4">
-              {/* Centered Vertical Rounded-Rectangle Passport Box (Blank until uploaded, never covered by camera) */}
+              {/* Centered Vertical Rounded-Rectangle Passport Box */}
               <div className="w-24 h-28 rounded-2xl border-2 border-[#0a6b3c] bg-white mx-auto flex items-center justify-center overflow-hidden">
                 {candidatePortraitUrl ? (
                   <img

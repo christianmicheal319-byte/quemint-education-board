@@ -69,6 +69,7 @@ export interface Candidate {
   examDate: string;
   examTime: string;
   createdAt: string;
+  updatedAt?: number;
 }
 
 export interface QuestionBankItem {
